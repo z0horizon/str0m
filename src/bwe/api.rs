@@ -26,6 +26,16 @@ pub enum BweKind {
         /// This does not guarantee that feedback is arriving.
         can_probe: bool,
     },
+    /// A probe result raised the TWCC estimate.
+    ///
+    /// Emitted at once, unsmoothed, when a probe cluster measures more than the estimate had
+    /// been, and followed by a [`BweKind::Twcc`] with the same estimate: the smoothing starts
+    /// again from this value rather than averaging in the estimate from before the probe. An
+    /// application that only reads `Twcc` sees the same estimate.
+    ProbeResult {
+        /// The estimate the probe result set.
+        estimate: Bitrate,
+    },
     /// REMB (Receiver Estimated Maximum Bitrate)
     Remb {
         /// Bitrate reported by the remote receiver.

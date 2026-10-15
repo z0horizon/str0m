@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use netem::{DataSize, NetemConfig};
-use str0m::bwe::Bitrate;
+use str0m::bwe::{Bitrate, BweKind};
 use str0m::{Event, RtcError};
 
 use crate::common::{
@@ -38,6 +38,14 @@ struct Recovery {
     estimate_at_action: Bitrate,
     /// Probe targets from the application's action on.
     probes: Vec<Bitrate>,
+    /// Estimate events from the link being restored on, with the time since then.
+    estimates: Vec<(Duration, Estimate)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Estimate {
+    Twcc(Bitrate),
+    ProbeResult(Bitrate),
 }
 
 /// Runs a sender at the low layer through a dip, lets `action` act 300 ms after the link is
@@ -56,6 +64,8 @@ fn recover(action: impl FnOnce(&mut TestRtc, Bitrate)) -> Result<Recovery, RtcEr
 
     set_link(&mut l, &mut r, LINK);
     let restored = l.duration();
+    let restored_at = l.last;
+    let restored_offset = l.events.len();
     ctx.run_for_duration(&mut l, &mut r, Duration::from_millis(300))?;
 
     let estimate_at_action = get_last_bwe_estimate(&l).expect("an estimate");
@@ -69,8 +79,12 @@ fn recover(action: impl FnOnce(&mut TestRtc, Bitrate)) -> Result<Recovery, RtcEr
     let mut elapsed = None;
     while l.duration() - restored < Duration::from_secs(20) {
         ctx.run_for_duration(&mut l, &mut r, Duration::from_millis(100))?;
-        if get_last_bwe_estimate(&l).is_some_and(|e| e >= RECOVERED) {
-            elapsed = Some(l.duration() - restored);
+        let since = l.duration() - restored;
+        if elapsed.is_none() && get_last_bwe_estimate(&l).is_some_and(|e| e >= RECOVERED) {
+            elapsed = Some(since);
+        }
+        // Keep running a while after recovering, so the events that follow can be checked.
+        if elapsed.is_some() && since >= Duration::from_secs(4) {
             break;
         }
     }
@@ -83,10 +97,27 @@ fn recover(action: impl FnOnce(&mut TestRtc, Bitrate)) -> Result<Recovery, RtcEr
         })
         .collect();
 
+    let estimates = l.events[restored_offset..]
+        .iter()
+        .filter_map(|(at, e)| {
+            let since = at.saturating_duration_since(restored_at);
+            match e {
+                Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. }) => {
+                    Some((since, Estimate::Twcc(*estimate)))
+                }
+                Event::EgressBitrateEstimate(BweKind::ProbeResult { estimate }) => {
+                    Some((since, Estimate::ProbeResult(*estimate)))
+                }
+                _ => None,
+            }
+        })
+        .collect();
+
     Ok(Recovery {
         elapsed,
         estimate_at_action,
         probes,
+        estimates,
     })
 }
 
@@ -132,5 +163,59 @@ fn padding_target_recovers_the_estimate_sooner() -> Result<(), RtcError> {
         with + Duration::from_secs(1) <= without,
         "padding recovers at least 1 s sooner: {with:?} vs {without:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn requested_probe_emits_probe_result_and_lifts_twcc() -> Result<(), RtcError> {
+    init_log();
+    init_crypto_default();
+
+    let run = recover(|l, estimate| l.bwe().request_probe(estimate * 2.0))?;
+    println!("{:?}", run.estimates);
+
+    let (at, result) = run
+        .estimates
+        .iter()
+        .find_map(|(at, e)| match e {
+            Estimate::ProbeResult(b) => Some((*at, *b)),
+            _ => None,
+        })
+        .expect("a ProbeResult after the request");
+    assert!(
+        result > run.estimate_at_action,
+        "a probe result above the estimate at the request: {result} vs {}",
+        run.estimate_at_action
+    );
+
+    // The smoother starts again from the probe result instead of averaging the dip back in.
+    let next_twcc = run
+        .estimates
+        .iter()
+        .filter(|(t, _)| *t >= at)
+        .find_map(|(_, e)| match e {
+            Estimate::Twcc(b) => Some(*b),
+            _ => None,
+        })
+        .expect("a Twcc estimate after the probe result");
+    assert!(
+        next_twcc >= result * 0.9,
+        "the next Twcc estimate continues from the probe result: {next_twcc} vs {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn no_probe_result_without_a_probe() -> Result<(), RtcError> {
+    init_log();
+    init_crypto_default();
+
+    let run = recover(|_, _| {})?;
+    let early: Vec<_> = run
+        .estimates
+        .iter()
+        .filter(|(t, e)| *t < Duration::from_secs(1) && matches!(e, Estimate::ProbeResult(_)))
+        .collect();
+    assert!(early.is_empty(), "probe results with no probe: {early:?}");
     Ok(())
 }

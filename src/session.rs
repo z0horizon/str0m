@@ -955,6 +955,15 @@ impl Session {
         let can_probe =
             self.bwe.is_some() && self.srtp_tx.is_some() && self.probe_media().is_some();
         if let Some(bwe) = &mut self.bwe {
+            // Drained like the estimate below, so a result cannot be delivered late.
+            let probe_result = bwe.poll_probe_result();
+            if let Some(estimate) = probe_result.filter(|_| can_probe) {
+                self.bwe_last_event = Some((estimate, true));
+                return Some(Event::EgressBitrateEstimate(BweKind::ProbeResult {
+                    estimate,
+                }));
+            }
+
             // Drain estimates even while unavailable so they cannot be delivered later.
             let estimate = bwe.poll_estimate();
             let estimate = match (can_probe, self.bwe_last_event) {

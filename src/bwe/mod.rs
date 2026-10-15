@@ -59,6 +59,8 @@ pub struct Bwe {
     bwe: SendSideBandwidthEstimator,
     desired_bitrate: Bitrate,
     smoother: EstimateSmoother,
+    /// A probe result that raised the estimate, not yet reported.
+    pending_probe_result: Option<Bitrate>,
 }
 
 impl Bwe {
@@ -68,6 +70,7 @@ impl Bwe {
             bwe: send_side_bwe,
             desired_bitrate: Bitrate::ZERO,
             smoother: EstimateSmoother::new(),
+            pending_probe_result: None,
         }
     }
 
@@ -89,6 +92,7 @@ impl Bwe {
 
     pub fn reset(&mut self, init_bitrate: Bitrate) {
         self.bwe.reset(init_bitrate);
+        self.pending_probe_result = None;
     }
 
     pub fn request_probe(&mut self, target: Bitrate, now: Instant) {
@@ -100,7 +104,23 @@ impl Bwe {
         records: impl Iterator<Item = &'t crate::rtp_::TwccSendRecord>,
         now: Instant,
     ) {
+        let before = self.bwe.last_estimate();
         self.bwe.update(records, now);
+        if !self.bwe.take_probe_applied() {
+            return;
+        }
+        let Some(after) = self.bwe.last_estimate() else {
+            return;
+        };
+        if before.is_none_or(|before| after > before) {
+            self.smoother.restart(now, after);
+            self.pending_probe_result = Some(after);
+        }
+    }
+
+    /// A probe result that raised the estimate since the last call.
+    pub fn poll_probe_result(&mut self) -> Option<Bitrate> {
+        self.pending_probe_result.take()
     }
 
     pub fn poll_estimate(&mut self) -> Option<Bitrate> {
@@ -141,6 +161,8 @@ struct SendSideBandwidthEstimator {
     alr_detector: AlrDetector,
     link_capacity_estimator: LinkCapacityEstimator,
     last_updated_estimate: Option<Bitrate>,
+    /// A probe result was applied by `update` since `take_probe_applied`.
+    probe_applied: bool,
 }
 
 impl SendSideBandwidthEstimator {
@@ -168,6 +190,7 @@ impl SendSideBandwidthEstimator {
             alr_detector,
             link_capacity_estimator: LinkCapacityEstimator::new(),
             last_updated_estimate: None,
+            probe_applied: false,
         }
     }
 
@@ -197,6 +220,7 @@ impl SendSideBandwidthEstimator {
         let mut latest_probe_result = None;
         for (config, bitrate) in self.probe_estimator.update(send_records.iter().copied()) {
             latest_probe_result = Some(bitrate);
+            self.probe_applied = true;
 
             // Update link capacity estimator for every successful ALR probe, not just the latest.
             // The estimator internally takes the max of all probe results, building up knowledge
@@ -419,6 +443,11 @@ impl SendSideBandwidthEstimator {
 
     pub fn reset(&mut self, init_bitrate: Bitrate) {
         *self = Self::new(init_bitrate);
+    }
+
+    /// Whether `update` applied a probe result since the last call.
+    pub fn take_probe_applied(&mut self) -> bool {
+        std::mem::take(&mut self.probe_applied)
     }
 }
 
