@@ -201,9 +201,10 @@ impl ProbeControl {
     /// The application knows what it wants to send next (for example the next simulcast or SVC
     /// layer) and when the link has stopped losing packets; the built-in triggers only probe in
     /// ALR every 5 s or after 15 s of stagnation. A successful result feeds exponential probing
-    /// like any other probe. Dropped while there is no estimate, or while delay is increasing
-    /// (the queue is growing now): the pending queue is sent without the built-in `can_probe`
-    /// check. A loss-limited estimate is not a reason to drop it: that state persists long after
+    /// like any other probe. Dropped while there is no estimate, while delay is increasing
+    /// (the queue is growing now; the pending queue is sent without the built-in `can_probe`
+    /// check), or when the capped target is not above the estimate, since a probe result
+    /// replaces the estimate. A loss-limited estimate is not a reason to drop it: that state persists long after
     /// the loss has stopped, and probing is how the application gets out of it.
     pub fn request_probe(&mut self, target: Bitrate, now: Instant) {
         if !self.enabled {
@@ -212,9 +213,14 @@ impl ProbeControl {
         let Some(desired) = self.desired_bitrate else {
             return;
         };
-        if self.last_estimate.is_none()
-            || self.last_cause == BandwidthLimitedCause::DelayBasedLimitedDelayIncreased
-        {
+        let Some(estimate) = self.last_estimate else {
+            return;
+        };
+        if self.last_cause == BandwidthLimitedCause::DelayBasedLimitedDelayIncreased {
+            return;
+        }
+        // A probe result replaces the estimate, so a probe at or below it could only lower it.
+        if target.min(desired * MAX_PROBE_BITRATE_FACTOR) <= estimate {
             return;
         }
         self.queue_probe(target, ProbeKind::Requested, desired, now);
@@ -765,6 +771,30 @@ mod test {
                 "a request made while disabled leaked"
             );
         }
+    }
+
+    #[test]
+    fn requested_probe_at_or_below_the_estimate_is_dropped() {
+        let mut pc = ProbeControl::new();
+        pc.enable(true);
+        let now = Instant::now();
+        pc.set_desired_bitrate(Bitrate::mbps(3));
+        pc.set_estimated_bitrate(Bitrate::mbps(1), BandwidthLimitedCause::DelayBasedLimited);
+        while pc.handle_timeout(now).is_some() {}
+
+        // A probe result replaces the estimate, so a probe below it could only lower it. An
+        // application reading a smoothed, lagging estimate asks for such probes.
+        pc.request_probe(Bitrate::kbps(800), now);
+        assert!(
+            pc.handle_timeout(now).is_none(),
+            "probed below the estimate"
+        );
+        pc.request_probe(Bitrate::mbps(1), now);
+        assert!(pc.handle_timeout(now).is_none(), "probed at the estimate");
+
+        pc.request_probe(Bitrate::kbps(1_500), now);
+        let p = pc.handle_timeout(now).expect("a probe above the estimate");
+        assert_eq!(p.target_bitrate(), Bitrate::kbps(1_500));
     }
 
     #[test]
