@@ -9,8 +9,8 @@ use netem::NetemConfig;
 use str0m::_internal_test_exports::ProbeClusterConfig;
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::format::Codec;
-use str0m::media::MediaKind;
 use str0m::media::Pt;
+use str0m::media::{Direction, MediaKind};
 use str0m::rtp::{RtpWrite, Ssrc};
 use str0m::{Event, Rtc, RtcError};
 use tracing::info;
@@ -144,6 +144,31 @@ impl BweTestContext {
             pt,
             seq_no: 47_000,
             media_send_rate: Bitrate::mbps(2), // Default to 2 Mbps
+            byte_budget: 0.0,
+        }
+    }
+
+    /// Like [`BweTestContext::new`], but with a video m-line negotiated through SDP.
+    ///
+    /// Media declared through the direct API has no remote payload types, which counts as
+    /// disabled, so the pacer sends no padding for it. Tests of padding need this one.
+    pub fn negotiated(l: &mut TestRtc, r: &mut TestRtc) -> Self {
+        let mid = negotiate(l, r, |change| {
+            change.add_media(MediaKind::Video, Direction::SendOnly, None, None, None)
+        });
+
+        let max = l.last.max(r.last);
+        l.last = max;
+        r.last = max;
+
+        let pt = l.params_vp8().pt();
+        let ssrc = l.direct_api().stream_tx_by_mid(mid, None).unwrap().ssrc();
+
+        Self {
+            ssrc,
+            pt,
+            seq_no: 47_000,
+            media_send_rate: Bitrate::mbps(2),
             byte_budget: 0.0,
         }
     }

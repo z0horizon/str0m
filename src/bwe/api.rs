@@ -61,6 +61,18 @@ impl<'a> Bwe<'a> {
         self.0.session.set_bwe_desired_bitrate(desired_bitrate);
     }
 
+    /// Ask for a probe cluster at `target` (capped at twice the desired bitrate).
+    ///
+    /// The built-in probe triggers only fire in the application-limited region every 5 s, or
+    /// after the estimate has stagnated for 15 s. An application that knows it is short of
+    /// bandwidth for the next quality step, and that the link is not losing packets, can probe
+    /// for that step at once instead. A successful result raises the estimate as any probe does.
+    /// Has no effect unless BWE is enabled and padding can be sent.
+    pub fn request_probe(&mut self, target: Bitrate) {
+        let now = self.0.last_now;
+        self.0.session.request_bwe_probe(target, now);
+    }
+
     /// Reset the BWE with a new init_bitrate
     ///
     /// This discards the current estimator state and starts estimation again

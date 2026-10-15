@@ -50,6 +50,8 @@ pub enum ProbeKind {
     PeriodicAlr,
     LargeDrop,
     Stagnant,
+    /// Asked for by the application through [`crate::bwe::Bwe::request_probe`].
+    Requested,
 }
 
 impl ProbeKind {
