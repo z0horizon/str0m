@@ -99,6 +99,14 @@ bandwidth estimate. This estimate is emitted to the application as an
 `Event::EgressBitrateEstimate` event and flows to the pacer control to
 adjust pacing and padding rates.
 
+The `BweKind::Twcc` estimate is averaged over a 3 s window
+(`src/bwe/smoother.rs`). When a probe result raises the estimate, the
+window starts again from that value, and the application first receives
+`BweKind::ProbeResult` with it and then a `BweKind::Twcc` with the same
+value. Averaging a probe result with the estimates from before the probe
+would only delay it; an application can use `ProbeResult` to act on proven
+capacity at once.
+
 The estimator also manages the probe lifecycle, creating probe cluster
 configurations via `maybe_create_probe()` when bandwidth discovery is
 needed, and tracking when probes complete. It monitors for overuse

@@ -52,6 +52,16 @@ impl EstimateSmoother {
         }
     }
 
+    /// Start the window again from `estimate`, and emit it on the next poll.
+    ///
+    /// Used when a probe result raises the estimate: averaging it with the estimates from before
+    /// the probe would only delay it.
+    pub fn restart(&mut self, now: Instant, estimate: Bitrate) {
+        self.estimates.clear();
+        self.estimates.push_back((now, estimate));
+        self.maybe_emit = true;
+    }
+
     /// Poll for an estimate to emit. Returns Some only when there's a new value to emit.
     pub fn poll(&mut self) -> Option<Bitrate> {
         if !self.maybe_emit {
@@ -93,4 +103,31 @@ fn in_tolerance(b1: Bitrate, b2: Bitrate) -> bool {
     let min = b1 * (1.0 - TOLERANCE);
     let max = b1 * (1.0 + TOLERANCE);
     b2 > min && b2 < max
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn restart_drops_the_window_and_emits_the_new_value() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut s = EstimateSmoother::new();
+
+        s.record(t0, Bitrate::kbps(400));
+        assert_eq!(s.poll(), Some(Bitrate::kbps(400)));
+
+        // A probe result: the window starts again from it, and readers of the smoothed estimate
+        // see it at once.
+        s.restart(t0 + ms(100), Bitrate::kbps(1_600));
+        assert_eq!(s.poll(), Some(Bitrate::kbps(1_600)));
+
+        s.record(t0 + ms(200), Bitrate::kbps(1_600));
+        assert_eq!(s.poll(), None);
+
+        // The average no longer includes the pre-probe 400 kbps.
+        s.record(t0 + ms(300), Bitrate::kbps(1_000));
+        assert_eq!(s.poll(), Some(Bitrate::kbps(1_300)));
+    }
 }

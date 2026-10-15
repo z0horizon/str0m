@@ -57,10 +57,13 @@ pub fn get_last_bwe_estimate(rtc: &TestRtc) -> Option<Bitrate> {
             let Event::EgressBitrateEstimate(kind) = e else {
                 return None;
             };
-            if let BweKind::Twcc { estimate, .. } = kind {
-                Some(estimate)
-            } else {
-                None
+            // A probe result that raised the estimate is reported unsmoothed, and the next
+            // `Twcc` continues from it.
+            match kind {
+                BweKind::Twcc { estimate, .. } | BweKind::ProbeResult { estimate } => {
+                    Some(estimate)
+                }
+                _ => None,
             }
         })
         .next_back()
