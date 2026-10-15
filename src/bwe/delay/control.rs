@@ -110,6 +110,13 @@ impl DelayController {
     }
 
     pub fn handle_timeout(&mut self, acked_bitrate: Option<Bitrate>, now: Instant) {
+        // The estimator runs this on every BWE timeout, not only ours. Rate control raises the
+        // estimate by at least 1 kbps per update, so running it early would grow the estimate
+        // with the caller's timeout rate rather than with time.
+        if now < self.next_timeout {
+            return;
+        }
+
         if !self.trendline_hypothesis_valid(now) {
             // We haven't received a TWCC report in a while. The trendline hypothesis can
             // no longer be considered valid. We need another TWCC report before we can update
@@ -222,5 +229,38 @@ impl DelayController {
                 .map(|rtt| rtt * 2)
                 .unwrap_or(MAX_TWCC_GAP)
                 .min(UPDATE_INTERVAL * 2)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn timeouts_before_the_update_interval_do_not_move_the_estimate() {
+        let now = Instant::now();
+        let mut c = DelayController::new(Bitrate::kbps(500));
+        let observed = Some(Bitrate::kbps(400));
+
+        // A TWCC report makes the hypothesis valid and schedules the next update.
+        c.update(&[], observed, None, now);
+        let after_report = c.last_estimate();
+        let next = c.poll_timeout();
+        assert!(next > now);
+
+        // The session drives handle_timeout on every Rtc timeout, often each millisecond while
+        // the pacer is busy. Only a due timeout may run rate control.
+        let mut t = now + Duration::from_millis(1);
+        while t < next {
+            c.handle_timeout(observed, t);
+            t += Duration::from_millis(1);
+        }
+        assert_eq!(c.last_estimate(), after_report);
+
+        c.handle_timeout(observed, next);
+        assert!(
+            c.last_estimate() > after_report,
+            "a due timeout still updates"
+        );
     }
 }
