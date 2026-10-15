@@ -1,5 +1,6 @@
 # Unreleased
 
+  * Add `Bwe::set_padding_target` to pad up to a send rate below the estimate
   * Add `Bwe::request_probe` for application-driven bandwidth probes
   * Prevent accumulated rounding error in TWCC receive timing #1071
   * Pace per-packet NACK retries by receive-side RTT and fix DLRR RTT routing #1070

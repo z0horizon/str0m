@@ -1332,6 +1332,11 @@ impl Session {
         }
     }
 
+    pub fn set_bwe_padding_target(&mut self, target: Option<Bitrate>) {
+        self.pacer_control.set_padding_target(target);
+        self.configure_pacer();
+    }
+
     pub fn request_bwe_probe(&mut self, target: Bitrate, now: Instant) {
         if let Some(bwe) = self.bwe.as_mut() {
             bwe.request_probe(target, now);

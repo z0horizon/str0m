@@ -18,11 +18,21 @@ pub(crate) struct PacingResult {
 }
 
 /// Controls the pacing and padding rates.
-pub(crate) struct PacerControl {}
+pub(crate) struct PacerControl {
+    /// Total rate the application wants padding to fill up to, capped by the estimate.
+    padding_target: Option<Bitrate>,
+}
 
 impl PacerControl {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            padding_target: None,
+        }
+    }
+
+    /// Pad up to `target` (never above the estimate) instead of the keep-alive rate.
+    pub fn set_padding_target(&mut self, target: Option<Bitrate>) {
+        self.padding_target = target;
     }
 
     pub fn calculate(
@@ -36,8 +46,12 @@ impl PacerControl {
             // No padding during overuse
             Bitrate::ZERO
         } else if has_active_media {
-            // Pad to 50 kbps to maintain NAT bindings and RTX state
-            PADDING_TARGET
+            // Pad to 50 kbps to maintain NAT bindings and RTX state, or to what the application
+            // asked for so that the acknowledged rate is up before it sends more media.
+            match self.padding_target {
+                Some(target) => target.min(estimate).max(PADDING_TARGET),
+                None => PADDING_TARGET,
+            }
         } else {
             // No padding when no media is being sent
             Bitrate::ZERO
@@ -59,6 +73,32 @@ impl PacerControl {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn padding_target_raises_padding_up_to_the_estimate() {
+        let mut c = PacerControl::new();
+        c.set_padding_target(Some(Bitrate::kbps(1_800)));
+        assert_eq!(
+            c.calculate(true, Bitrate::kbps(2_200), false).padding_rate,
+            Bitrate::kbps(1_800)
+        );
+        // Never above the estimate.
+        assert_eq!(
+            c.calculate(true, Bitrate::kbps(1_000), false).padding_rate,
+            Bitrate::kbps(1_000)
+        );
+        // Overuse still stops padding.
+        assert_eq!(
+            c.calculate(true, Bitrate::kbps(2_200), true).padding_rate,
+            Bitrate::ZERO
+        );
+        // Cleared: back to the keep-alive rate.
+        c.set_padding_target(None);
+        assert_eq!(
+            c.calculate(true, Bitrate::kbps(2_200), false).padding_rate,
+            PADDING_TARGET
+        );
+    }
 
     #[test]
     fn padding_enabled_with_active_media() {
