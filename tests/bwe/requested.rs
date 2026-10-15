@@ -67,7 +67,7 @@ fn recover(action: impl FnOnce(&mut TestRtc, Bitrate)) -> Result<Recovery, RtcEr
     action(&mut l, estimate_at_action);
 
     let mut elapsed = None;
-    while l.duration() - restored < Duration::from_secs(12) {
+    while l.duration() - restored < Duration::from_secs(20) {
         ctx.run_for_duration(&mut l, &mut r, Duration::from_millis(100))?;
         if get_last_bwe_estimate(&l).is_some_and(|e| e >= RECOVERED) {
             elapsed = Some(l.duration() - restored);
