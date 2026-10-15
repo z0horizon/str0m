@@ -73,6 +73,17 @@ impl<'a> Bwe<'a> {
         self.0.session.request_bwe_probe(target, now);
     }
 
+    /// Let padding fill the total send rate up to `target` (capped by the current estimate).
+    ///
+    /// By default str0m pads to about 50 kbps when media is flowing. Before stepping up to a
+    /// higher simulcast or SVC layer, an application can set the target to what it will send
+    /// after the step, so the rate the receiver acknowledges is already there when it takes the
+    /// step; otherwise the step, read as overuse, cuts the estimate to below the old rate.
+    /// `None` returns to the default. Padding still stops during overuse.
+    pub fn set_padding_target(&mut self, target: Option<Bitrate>) {
+        self.0.session.set_bwe_padding_target(target);
+    }
+
     /// Reset the BWE with a new init_bitrate
     ///
     /// This discards the current estimator state and starts estimation again
