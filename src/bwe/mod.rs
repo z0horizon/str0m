@@ -91,6 +91,10 @@ impl Bwe {
         self.bwe.reset(init_bitrate);
     }
 
+    pub fn request_probe(&mut self, target: Bitrate, now: Instant) {
+        self.bwe.request_probe(target, now);
+    }
+
     pub fn update<'t>(
         &mut self,
         records: impl Iterator<Item = &'t crate::rtp_::TwccSendRecord>,
@@ -140,6 +144,10 @@ struct SendSideBandwidthEstimator {
 }
 
 impl SendSideBandwidthEstimator {
+    pub fn request_probe(&mut self, target: Bitrate, now: Instant) {
+        self.probe_control.request_probe(target, now);
+    }
+
     pub fn new(initial_bitrate: Bitrate) -> Self {
         let mut alr_detector = AlrDetector::new();
         alr_detector.set_estimated_bitrate(initial_bitrate);

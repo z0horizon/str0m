@@ -1332,6 +1332,12 @@ impl Session {
         }
     }
 
+    pub fn request_bwe_probe(&mut self, target: Bitrate, now: Instant) {
+        if let Some(bwe) = self.bwe.as_mut() {
+            bwe.request_probe(target, now);
+        }
+    }
+
     pub fn reset_bwe(&mut self, init_bitrate: Bitrate) {
         if let Some(bwe) = self.bwe.as_mut() {
             bwe.reset(init_bitrate);
