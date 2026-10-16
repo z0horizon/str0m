@@ -23,6 +23,14 @@ const MAX_ESTIMATE_RATIO: f64 = 1.5;
 const DEFAULT_BACKOFF_TIME: Duration = Duration::from_millis(100);
 /// Number of standard deviations below mean to reset observed bitrate average.
 const OBSERVED_BITRATE_RESET_THRESHOLD_STD: f64 = 3.0;
+/// How long after a probe result its bound applies to the overuse episode that follows it.
+const PROBE_FLOOR_WINDOW: Duration = Duration::from_secs(2);
+/// How long into an overuse episode the probe's bound applies. A self-induced queue drains
+/// within about 150 ms.
+const PROBE_FLOOR_MAX_EPISODE: Duration = Duration::from_millis(500);
+/// The share of the acknowledged rate at the episode's first cut below which the link is taken to
+/// have got worse, which ends the bound.
+const PROBE_FLOOR_MIN_OBSERVED_RATIO: f64 = 0.9;
 
 /// A type used to estimates a suitable send bitrate.
 ///
@@ -45,6 +53,10 @@ pub struct RateControl {
     last_estimate_update: Option<Instant>,
     // Last RTT estimate in micro-seconds
     last_rtt: Option<Duration>,
+    /// The last probe result and when it was applied, until an overuse episode uses it.
+    last_probe: Option<(Bitrate, Instant)>,
+    /// The probe's bound on the current overuse episode, if a probe preceded it.
+    episode_floor: Option<EpisodeFloor>,
 }
 
 impl RateControl {
@@ -62,6 +74,8 @@ impl RateControl {
             averaged_observed_bitrate: MovingAverage::new(OBSERVED_BIT_RATE_SMOOTHING_FACTOR),
             last_estimate_update: None,
             last_rtt: None,
+            last_probe: None,
+            episode_floor: None,
         }
     }
 
@@ -79,6 +93,9 @@ impl RateControl {
         }
 
         self.state = self.state.transition(signal);
+        if signal != Signal::Overuse {
+            self.episode_floor = None;
+        }
         log_rate_control_observed_bitrate!(
             observed_bitrate.as_f64(),
             self.averaged_observed_bitrate
@@ -179,6 +196,7 @@ impl RateControl {
         // or changing the rate control state. Accept the probe result unconditionally
         // (update_estimate handles clamping to min/max bounds).
         self.update_estimate(probe_bitrate, now);
+        self.last_probe = Some((probe_bitrate, now));
 
         // Do NOT change self.state - keep current state to match WebRTC behavior.
         // Changing state here could trigger unintended AIMD decrease/increase logic.
@@ -249,6 +267,34 @@ impl RateControl {
         log_rate_control_applied_change!("decrease");
         let mut new_estimate = observed_bitrate * BETA;
 
+        // A probe that just proved the capacity bounds the cut of the overuse episode that
+        // follows it. Such an episode is often self-induced by an application that raises its
+        // send rate in a step once the probe succeeds (an SFU switching to a higher layer, with a
+        // keyframe): the acknowledged rate still reflects the rate before the step, and 0.85x of
+        // it would undo the step. libwebrtc bounds the cut by `link_capacity_lower` the same way
+        // when a network state estimator is configured. Only one episode per probe is bounded,
+        // and only while it looks self-induced: short, with an acknowledged rate that does not
+        // fall. Loss is still handled by the loss controller.
+        if self.episode_floor.is_none() {
+            self.episode_floor = self.last_probe.take().map(|(probe, at)| EpisodeFloor {
+                floor: probe * BETA,
+                probe_at: at,
+                started_at: now,
+                first_observed: observed_bitrate,
+                lifted: false,
+            });
+        }
+        if let Some(bound) = &mut self.episode_floor {
+            // A link that really got worse shows as a long episode or a falling acknowledged
+            // rate; from then on the episode is cut as usual.
+            bound.lifted |= now.saturating_duration_since(bound.probe_at) > PROBE_FLOOR_WINDOW
+                || now.saturating_duration_since(bound.started_at) > PROBE_FLOOR_MAX_EPISODE
+                || observed_bitrate < bound.first_observed * PROBE_FLOOR_MIN_OBSERVED_RATIO;
+            if !bound.lifted {
+                new_estimate = new_estimate.max(bound.floor);
+            }
+        }
+
         if self.estimated_bitrate < new_estimate {
             // Avoid increasing the bitrate on overuse
             new_estimate = self.estimated_bitrate;
@@ -296,6 +342,16 @@ impl RateControl {
 
         bits_per_frame / packets_per_frame
     }
+}
+
+/// How far a probe result bounds the cut of the overuse episode that follows it.
+#[derive(Debug, Clone, Copy)]
+struct EpisodeFloor {
+    floor: Bitrate,
+    probe_at: Instant,
+    started_at: Instant,
+    first_observed: Bitrate,
+    lifted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -515,6 +571,158 @@ mod test {
             // NB: Additive increase because we are nearing convergence
             rate_controller.update(Signal::Normal, 70_000.into(), None, now + duration_ms(3500));
             assert_eq!(rate_controller.estimated_bitrate().as_u64(), 72552);
+        }
+
+        /// An application that sends in steps (an SFU switching to a higher layer, with a
+        /// keyframe) right after a probe proved the capacity causes a short self-induced queue.
+        /// The acknowledged rate still reflects the rate before the step, so the usual cut to
+        /// 0.85x of it would drop far below what the probe proved.
+        #[test]
+        fn overuse_right_after_a_probe_is_cut_no_lower_than_the_probe_allows() {
+            let now = Instant::now();
+            let mut rate_controller = make_control(500_000);
+            rate_controller.update(Signal::Normal, 500_000.into(), None, now);
+            rate_controller.set_probe_result(3_000_000.into(), now + duration_ms(100));
+
+            rate_controller.update(
+                Signal::Overuse,
+                600_000.into(),
+                None,
+                now + duration_ms(700),
+            );
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 2_550_000);
+
+            // The same overuse episode, cut again: the floor still holds.
+            rate_controller.update(
+                Signal::Overuse,
+                650_000.into(),
+                None,
+                now + duration_ms(1000),
+            );
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 2_550_000);
+        }
+
+        /// The floor covers only the first overuse episode after a probe. If the link really got
+        /// worse, the next episode is cut as usual.
+        #[test]
+        fn a_later_overuse_episode_is_cut_as_usual() {
+            let now = Instant::now();
+            let mut rate_controller = make_control(500_000);
+            rate_controller.update(Signal::Normal, 500_000.into(), None, now);
+            rate_controller.set_probe_result(3_000_000.into(), now + duration_ms(100));
+
+            rate_controller.update(
+                Signal::Overuse,
+                600_000.into(),
+                None,
+                now + duration_ms(700),
+            );
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 2_550_000);
+
+            rate_controller.update(Signal::Normal, 600_000.into(), None, now + duration_ms(800));
+            rate_controller.update(
+                Signal::Overuse,
+                600_000.into(),
+                None,
+                now + duration_ms(1000),
+            );
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 510_000);
+        }
+
+        /// An overuse episode that outlasts the probe's window is cut as usual from then on: the
+        /// link may really have got worse right after the probe.
+        #[test]
+        fn a_long_overuse_episode_is_bounded_only_within_the_window() {
+            let now = Instant::now();
+            let mut rate_controller = make_control(500_000);
+            rate_controller.update(Signal::Normal, 500_000.into(), None, now);
+            rate_controller.set_probe_result(3_000_000.into(), now + duration_ms(100));
+
+            rate_controller.update(
+                Signal::Overuse,
+                600_000.into(),
+                None,
+                now + duration_ms(700),
+            );
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 2_550_000);
+
+            rate_controller.update(
+                Signal::Overuse,
+                600_000.into(),
+                None,
+                now + duration_ms(2200),
+            );
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 510_000);
+        }
+
+        /// When the link itself got worse right after the probe, the acknowledged rate keeps
+        /// falling during the episode; a self-induced queue does not lower it. A falling
+        /// acknowledged rate ends the bound for the rest of the episode.
+        #[test]
+        fn a_falling_acknowledged_rate_lifts_the_bound() {
+            let now = Instant::now();
+            let mut rate_controller = make_control(500_000);
+            rate_controller.update(Signal::Normal, 1_700_000.into(), None, now);
+            rate_controller.set_probe_result(3_000_000.into(), now + duration_ms(100));
+
+            rate_controller.update(
+                Signal::Overuse,
+                1_700_000.into(),
+                None,
+                now + duration_ms(300),
+            );
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 2_550_000);
+
+            rate_controller.update(
+                Signal::Overuse,
+                1_400_000.into(),
+                None,
+                now + duration_ms(400),
+            );
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 1_190_000);
+        }
+
+        /// A self-induced queue drains within a few hundred milliseconds; a longer episode is
+        /// cut as usual even if the acknowledged rate holds.
+        #[test]
+        fn the_bound_lasts_at_most_half_a_second_of_an_episode() {
+            let now = Instant::now();
+            let mut rate_controller = make_control(500_000);
+            rate_controller.update(Signal::Normal, 1_700_000.into(), None, now);
+            rate_controller.set_probe_result(3_000_000.into(), now + duration_ms(100));
+
+            rate_controller.update(
+                Signal::Overuse,
+                1_700_000.into(),
+                None,
+                now + duration_ms(300),
+            );
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 2_550_000);
+
+            rate_controller.update(
+                Signal::Overuse,
+                1_700_000.into(),
+                None,
+                now + duration_ms(900),
+            );
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 1_445_000);
+        }
+
+        /// A probe proves the capacity only for a short time.
+        #[test]
+        fn overuse_long_after_a_probe_is_cut_as_usual() {
+            let now = Instant::now();
+            let mut rate_controller = make_control(500_000);
+            rate_controller.update(Signal::Normal, 500_000.into(), None, now);
+            rate_controller.set_probe_result(3_000_000.into(), now + duration_ms(100));
+
+            rate_controller.update(
+                Signal::Overuse,
+                600_000.into(),
+                None,
+                now + duration_ms(2500),
+            );
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 510_000);
         }
     }
 
