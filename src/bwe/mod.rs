@@ -29,7 +29,6 @@ mod link_capacity_estimator;
 mod loss_controller;
 mod macros;
 mod probe;
-mod smoother;
 mod time;
 
 use acked_bitrate_estimator::AckedBitrateEstimator;
@@ -38,7 +37,6 @@ use delay::DelayController;
 use link_capacity_estimator::LinkCapacityEstimator;
 use loss_controller::{LossController, LossControllerState};
 use macros::log_loss;
-use smoother::EstimateSmoother;
 
 pub(crate) use macros::{log_pacer_media_debt, log_pacer_padding_debt};
 #[cfg(test)]
@@ -55,14 +53,11 @@ const INITIAL_BITRATE_WINDOW: Duration = Duration::from_millis(500);
 const BITRATE_WINDOW: Duration = Duration::from_millis(150);
 const STARTUP_PHASE: Duration = Duration::from_secs(2);
 
-/// A raw estimate below this share of the last emitted estimate is reported at once instead of
-/// through the 3 s mean, so readers of the smoothed estimate see a collapse within one update.
-const DECREASE_RESTART_RATIO: f64 = 0.8;
-
 pub struct Bwe {
     bwe: SendSideBandwidthEstimator,
     desired_bitrate: Bitrate,
-    smoother: EstimateSmoother,
+    /// The estimate last returned by `poll_estimate`.
+    last_reported: Option<Bitrate>,
     /// A probe result that raised the estimate, not yet reported.
     pending_probe_result: Option<Bitrate>,
 }
@@ -73,17 +68,13 @@ impl Bwe {
         Bwe {
             bwe: send_side_bwe,
             desired_bitrate: Bitrate::ZERO,
-            smoother: EstimateSmoother::new(),
+            last_reported: None,
             pending_probe_result: None,
         }
     }
 
     pub fn handle_timeout(&mut self, now: Instant, do_probe: bool) -> Option<ProbeClusterConfig> {
-        let result = self.bwe.handle_timeout(self.desired_bitrate, do_probe, now);
-        if let Some(estimate) = self.bwe.last_estimate() {
-            self.smoother.record(now, estimate);
-        }
-        result
+        self.bwe.handle_timeout(self.desired_bitrate, do_probe, now)
     }
 
     pub fn start_probe(&mut self, config: ProbeClusterConfig, now: Instant) -> bool {
@@ -110,16 +101,14 @@ impl Bwe {
     ) {
         let before = self.bwe.last_estimate();
         self.bwe.update(records, now);
-        let probe_applied = self.bwe.take_probe_applied();
+        if !self.bwe.take_probe_applied() {
+            return;
+        }
         let Some(after) = self.bwe.last_estimate() else {
             return;
         };
-        if probe_applied && before.is_none_or(|before| after > before) {
-            self.smoother.restart(now, after);
+        if before.is_none_or(|before| after > before) {
             self.pending_probe_result = Some(after);
-        } else if decrease_restarts(self.smoother.emitted(), after) {
-            // Smooth increases only: a collapse must reach the allocator now, not in 3 s.
-            self.smoother.restart(now, after);
         }
     }
 
@@ -128,8 +117,12 @@ impl Bwe {
         self.pending_probe_result.take()
     }
 
+    /// The estimate, each time it changes.
+    ///
+    /// Like libwebrtc's `GoogCcNetworkController::MaybeTriggerOnNetworkChanged`, which hands
+    /// every new target rate to its consumers: no averaging, so a decrease takes effect at once.
     pub fn poll_estimate(&mut self) -> Option<Bitrate> {
-        self.smoother.poll()
+        report_if_changed(&mut self.last_reported, self.bwe.last_estimate())
     }
 
     pub fn poll_timeout(&self) -> (Option<Instant>, Reason) {
@@ -156,10 +149,14 @@ impl Bwe {
     }
 }
 
-/// Whether a raw estimate of `raw` has fallen far enough below the last emitted estimate to be
-/// reported at once.
-fn decrease_restarts(emitted: Option<Bitrate>, raw: Bitrate) -> bool {
-    emitted.is_some_and(|emitted| raw < emitted * DECREASE_RESTART_RATIO)
+/// Returns `estimate` and remembers it when it differs from the last reported value.
+fn report_if_changed(last: &mut Option<Bitrate>, estimate: Option<Bitrate>) -> Option<Bitrate> {
+    let estimate = estimate?;
+    if *last == Some(estimate) {
+        return None;
+    }
+    *last = Some(estimate);
+    Some(estimate)
 }
 
 struct SendSideBandwidthEstimator {
@@ -542,18 +539,24 @@ impl fmt::Display for BandwidthUsage {
 }
 
 #[cfg(test)]
-mod decrease_test {
+mod estimate_report_test {
     use super::*;
 
     #[test]
-    fn decrease_restarts_past_twenty_percent() {
-        let emitted = Some(Bitrate::kbps(2_000));
-        assert!(decrease_restarts(emitted, Bitrate::kbps(1_400)));
-        assert!(!decrease_restarts(emitted, Bitrate::kbps(1_800)));
-        // Just above the 0.8 boundary; exactly 1.6 Mbps is avoided because of float rounding.
-        assert!(!decrease_restarts(emitted, Bitrate::kbps(1_610)));
-        assert!(!decrease_restarts(None, Bitrate::kbps(1_000)));
-        // Increases never restart here; the probe path handles those.
-        assert!(!decrease_restarts(emitted, Bitrate::kbps(3_000)));
+    fn reports_every_change_without_averaging() {
+        let mut last = None;
+        assert_eq!(report_if_changed(&mut last, None), None);
+        assert_eq!(report_if_changed(&mut last, Some(Bitrate::kbps(2_000))), Some(Bitrate::kbps(2_000)));
+        // Unchanged: nothing to report.
+        assert_eq!(report_if_changed(&mut last, Some(Bitrate::kbps(2_000))), None);
+        // A collapse is reported as is, not averaged with the previous value.
+        assert_eq!(report_if_changed(&mut last, Some(Bitrate::kbps(500))), Some(Bitrate::kbps(500)));
+        // So is a rise.
+        assert_eq!(report_if_changed(&mut last, Some(Bitrate::kbps(800))), Some(Bitrate::kbps(800)));
+        // A small change is still a change.
+        assert_eq!(report_if_changed(&mut last, Some(Bitrate::kbps(810))), Some(Bitrate::kbps(810)));
+        // No estimate keeps the last reported value.
+        assert_eq!(report_if_changed(&mut last, None), None);
+        assert_eq!(last, Some(Bitrate::kbps(810)));
     }
 }
