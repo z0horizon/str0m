@@ -1,5 +1,6 @@
 # Unreleased
 
+  * Tolerate spaces and a trailing semicolon in fmtp parameters #1076
   * Rate-limit SRTP/SRTCP decryption warnings #1088
   * Include authenticated early RTX padding in TWCC feedback and ingress loss accounting #1086
   * Reduce RTX receive memory use with a 128-position sequence window #1089
