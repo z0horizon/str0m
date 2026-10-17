@@ -1274,6 +1274,16 @@ impl StreamTx {
         self.padding = 0;
     }
 
+    /// Forget every packet sent so far for retransmission purposes.
+    ///
+    /// Queued resends are dropped and NACKs for packets sent before this call are ignored.
+    /// Packets written after this call are cached and repaired as usual. Use it when a keyframe
+    /// that replaces everything sent so far has been requested.
+    pub fn discard_resends(&mut self) {
+        self.resends.clear();
+        self.rtx_cache.clear();
+    }
+
     /// Reset this stream to use a new SSRC and optionally a new RTX SSRC.
     ///
     /// This updates the SSRCs and resets all relevant internal fields.
@@ -1514,5 +1524,52 @@ mod test {
             }),
             now + Duration::from_millis(750)
         );
+    }
+
+    fn cached_packet(seq_no: u64, now: Instant) -> RtpPacket {
+        RtpPacket {
+            header: RtpHeader::default(),
+            seq_no: seq_no.into(),
+            time: MediaTime::from_90khz(0),
+            payload: vec![0u8; 100].into(),
+            vp8_patch: None,
+            timestamp: now,
+            last_sender_info: None,
+            nackable: true,
+        }
+    }
+
+    #[test]
+    fn discard_resends_drops_queued_and_cached() {
+        let now = Instant::now();
+        let mut stream =
+            StreamTx::new(42.into(), Some(44.into()), MidRid(Mid::from("0"), None), false, 1200);
+        for seq in 1..=10 {
+            stream.rtx_cache.cache_sent_packet(cached_packet(seq, now), now);
+        }
+        stream.handle_nack([NackEntry { pid: 3, blp: 0b10 }].into_iter(), now);
+        assert_eq!(stream.resends.len(), 2);
+        stream.discard_resends();
+        assert!(stream.resends.is_empty());
+        assert!(stream.poll_packet_resend(now).is_none());
+        stream.handle_nack([NackEntry { pid: 3, blp: 0 }].into_iter(), now);
+        assert!(stream.resends.is_empty());
+    }
+
+    #[test]
+    fn packets_after_discard_are_repaired() {
+        let now = Instant::now();
+        let mut stream =
+            StreamTx::new(42.into(), Some(44.into()), MidRid(Mid::from("0"), None), false, 1200);
+        for seq in 1..=10 {
+            stream.rtx_cache.cache_sent_packet(cached_packet(seq, now), now);
+        }
+        stream.discard_resends();
+        for seq in 11..=12 {
+            stream.rtx_cache.cache_sent_packet(cached_packet(seq, now), now);
+        }
+        stream.handle_nack([NackEntry { pid: 11, blp: 0 }].into_iter(), now);
+        let next = stream.poll_packet_resend(now).expect("resend of 11");
+        assert_eq!(next.kind, NextPacketKind::Resend(11.into()));
     }
 }
