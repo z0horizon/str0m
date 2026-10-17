@@ -99,6 +99,9 @@ pub(crate) struct Session {
     bwe: Option<Bwe>,
     bwe_last_event: Option<(Bitrate, bool)>,
 
+    /// Bounds retransmissions at the send-side estimate, as libwebrtc does.
+    rtx_limiter: crate::streams::RetransmissionLimiter,
+
     enable_twcc_feedback: bool,
 
     /// A pacer for sending RTP at specific rate.
@@ -204,6 +207,7 @@ impl Session {
             max_rx_seq_lookup: HashMap::new(),
             bwe,
             bwe_last_event: None,
+            rtx_limiter: crate::streams::RetransmissionLimiter::new(),
             enable_twcc_feedback: false,
             pacer,
             pacer_control: PacerControl::new(),
@@ -931,7 +935,13 @@ impl Session {
                 let Some(stream) = self.streams.stream_tx(&fb.ssrc()) else {
                     continue;
                 };
-                stream.handle_rtcp(now, fb);
+                if let RtcpFb::Nack(_, list) = fb {
+                    self.rtx_limiter
+                        .set_max_rate(self.bwe.as_ref().and_then(|bwe| bwe.last_estimate()));
+                    stream.handle_nack_limited(list.into_iter(), now, &mut self.rtx_limiter);
+                } else {
+                    stream.handle_rtcp(now, fb);
+                }
             }
         }
 

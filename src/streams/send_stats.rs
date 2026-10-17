@@ -63,6 +63,15 @@ impl StreamTxStats {
         }
     }
 
+    pub(crate) fn rtt(&self) -> Option<Duration> {
+        self.rtt
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_rtt(&mut self, rtt: Option<Duration>) {
+        self.rtt = rtt;
+    }
+
     pub fn update_packet_counts(&mut self, bytes: u64, is_resend: bool) {
         self.packets += 1;
         self.bytes += bytes;
