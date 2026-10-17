@@ -205,6 +205,7 @@ pub struct RtpWrite {
     marker: bool,
     ext_vals: ExtensionValues,
     nackable: bool,
+    essential: bool,
     payload: Arc<[u8]>,
     csrc_count: usize,
     csrc: [u32; 15],
@@ -254,6 +255,7 @@ impl RtpWrite {
             marker: false,
             ext_vals: ExtensionValues::default(),
             nackable: false,
+            essential: false,
             payload: payload.into(),
             csrc_count: 0,
             csrc: [0; 15],
@@ -276,6 +278,13 @@ impl RtpWrite {
     /// Set whether this RTP packet should respond to incoming NACKs.
     pub fn nackable(mut self, nackable: bool) -> Self {
         self.nackable = nackable;
+        self
+    }
+
+    /// Mark the packet as essential: if it is NACKed, it is resent before other resends and
+    /// may use the session's whole retransmission budget instead of half of it.
+    pub fn essential(mut self, essential: bool) -> Self {
+        self.essential = essential;
         self
     }
 
@@ -453,6 +462,7 @@ impl StreamTx {
             marker,
             ext_vals,
             nackable,
+            essential,
             payload,
             csrc_count,
             csrc,
@@ -493,6 +503,7 @@ impl StreamTx {
             payload,
             vp8_patch,
             nackable,
+            essential,
             // The overall idea for str0m is to only drive time forward from handle_input. If we
             // used a "now" argument to write_rtp(), we effectively get a second point that also need
             // to move time forward _for all of Rtc_ – that's too complicated.
@@ -1058,18 +1069,23 @@ impl StreamTx {
             };
 
             if let Some(limiter) = limiter.as_deref_mut() {
-                if !limiter.try_use(packet.payload.len(), now) {
+                if !limiter.try_use(packet.payload.len(), now, packet.essential) {
                     // Over the retransmission budget: this packet is not resent.
                     continue;
                 }
             }
 
+            let essential = packet.essential;
             let resend = Resend {
                 seq_no,
                 queued_at: now,
                 payload_size: packet.payload.len(),
             };
-            self.resends.push_back(resend);
+            if essential {
+                self.resends.push_front(resend);
+            } else {
+                self.resends.push_back(resend);
+            }
         }
 
         Some(())
@@ -1587,7 +1603,34 @@ mod test {
             timestamp: now,
             last_sender_info: None,
             nackable: true,
+            essential: false,
         }
+    }
+
+    fn essential_packet(seq_no: u64, now: Instant) -> RtpPacket {
+        let mut p = cached_packet(seq_no, now);
+        p.essential = true;
+        p
+    }
+
+    #[test]
+    fn essential_resend_goes_first_and_past_the_ordinary_budget() {
+        use crate::streams::RetransmissionLimiter;
+        let now = Instant::now();
+        let mut stream =
+            StreamTx::new(42.into(), Some(44.into()), MidRid(Mid::from("0"), None), false, 1200);
+        for seq in 1..=4 {
+            stream.rtx_cache.cache_sent_packet(cached_packet(seq, now), now);
+        }
+        stream.rtx_cache.cache_sent_packet(essential_packet(5, now), now);
+        let mut limiter = RetransmissionLimiter::new();
+        // 0.5 x 3_200 bps over 500 ms = 100 bytes: one ordinary 100-byte packet; essential packets
+        // get 200 bytes in all.
+        limiter.set_max_rate(Some(Bitrate::bps(3_200)));
+        // NACK 3 (ordinary), then 4 (ordinary, over budget), then 5 (essential).
+        stream.handle_nack([NackEntry { pid: 3, blp: 0b11 }].into_iter(), now, Some(&mut limiter));
+        let order: Vec<u64> = stream.resends.iter().map(|r| *r.seq_no).collect();
+        assert_eq!(order, vec![5, 3]);
     }
 
     #[test]
