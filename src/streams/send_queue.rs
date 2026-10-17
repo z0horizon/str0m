@@ -221,6 +221,7 @@ mod test {
             timestamp: Instant::now(),
             last_sender_info: None,
             nackable: true,
+            essential: false,
         });
 
         assert!(queue.peek().is_none());
@@ -257,6 +258,7 @@ mod test {
             timestamp: start,
             last_sender_info: None,
             nackable: true,
+            essential: false,
         });
 
         queue.handle_timeout(start);
@@ -295,6 +297,7 @@ mod test {
             timestamp: start,
             last_sender_info: None,
             nackable: true,
+            essential: false,
         });
         queue.push(RtpPacket {
             seq_no: 1.into(),
@@ -305,6 +308,7 @@ mod test {
             timestamp: start,
             last_sender_info: None,
             nackable: true,
+            essential: false,
         });
         queue.push(RtpPacket {
             seq_no: 2.into(),
@@ -315,6 +319,7 @@ mod test {
             timestamp: start,
             last_sender_info: None,
             nackable: true,
+            essential: false,
         });
 
         assert!(
