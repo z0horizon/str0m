@@ -97,6 +97,11 @@ impl EstimateSmoother {
         self.emitted = Some(rate);
         Some(rate)
     }
+
+    /// The last value `poll` returned, if any.
+    pub fn emitted(&self) -> Option<Bitrate> {
+        self.emitted
+    }
 }
 
 fn in_tolerance(b1: Bitrate, b2: Bitrate) -> bool {
@@ -129,5 +134,27 @@ mod test {
         // The average no longer includes the pre-probe 400 kbps.
         s.record(t0 + ms(300), Bitrate::kbps(1_000));
         assert_eq!(s.poll(), Some(Bitrate::kbps(1_300)));
+    }
+
+    #[test]
+    fn restart_emits_a_lower_value_at_once() {
+        let t0 = Instant::now();
+        let mut s = EstimateSmoother::new();
+        s.record(t0, Bitrate::kbps(2_000));
+        assert_eq!(s.poll(), Some(Bitrate::kbps(2_000)));
+        assert_eq!(s.emitted(), Some(Bitrate::kbps(2_000)));
+        s.restart(t0 + Duration::from_millis(100), Bitrate::kbps(1_400));
+        assert_eq!(s.poll(), Some(Bitrate::kbps(1_400)));
+        assert_eq!(s.emitted(), Some(Bitrate::kbps(1_400)));
+    }
+
+    #[test]
+    fn increase_after_restart_follows_the_mean() {
+        let t0 = Instant::now();
+        let mut s = EstimateSmoother::new();
+        s.restart(t0, Bitrate::kbps(500));
+        assert_eq!(s.poll(), Some(Bitrate::kbps(500)));
+        s.record(t0 + Duration::from_millis(100), Bitrate::kbps(1_000));
+        assert_eq!(s.poll(), Some(Bitrate::kbps(750)));
     }
 }
