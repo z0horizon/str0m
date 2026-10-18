@@ -1351,6 +1351,16 @@ impl StreamTx {
         self.resent_at.clear();
     }
 
+    /// Drop every packet written but not yet sent.
+    ///
+    /// The receiver sees the dropped packets as lost. Use it with [`StreamTx::discard_resends`]
+    /// when a keyframe that replaces them has been requested, so the keyframe does not wait
+    /// behind them in the pacer queue. Packets written after this call are sent as usual.
+    pub fn discard_queued(&mut self) {
+        self.send_queue.clear();
+        self.queue_info = None;
+    }
+
     /// Reset this stream to use a new SSRC and optionally a new RTX SSRC.
     ///
     /// This updates the SSRCs and resets all relevant internal fields.
@@ -1691,6 +1701,36 @@ mod test {
         assert!(stream.poll_packet_resend(now).is_none());
         stream.handle_nack([NackEntry { pid: 3, blp: 0 }].into_iter(), now, None);
         assert!(stream.resends.is_empty());
+    }
+
+    #[test]
+    fn discard_queued_drops_unsent_packets_and_keeps_later_ones() {
+        let now = Instant::now();
+        let pt = CodecConfig::new_with_defaults().params()[0].pt();
+        let mut stream = StreamTx::new(
+            42.into(),
+            Some(44.into()),
+            MidRid(Mid::from("0"), None),
+            false,
+            1200,
+        );
+        let write = |stream: &mut StreamTx, seq: u64| {
+            stream.write_rtp(RtpWrite::new(pt, seq.into(), 0, now, vec![0_u8; 1000]));
+            stream.send_queue.handle_timeout(now);
+        };
+        for seq in 1..=3 {
+            write(&mut stream, seq);
+        }
+        assert_eq!(stream.queue_state(now).snapshot.packet_count, 3);
+        stream.discard_queued();
+        assert!(stream.send_queue.peek().is_none());
+        assert_eq!(stream.queue_info().map(|q| q.byte_size()), None);
+        let snapshot = stream.queue_state(now).snapshot;
+        assert_eq!(snapshot.packet_count, 0);
+        assert_eq!(snapshot.byte_size, 0);
+        assert_eq!(snapshot.total_queue_time(now), Duration::ZERO);
+        write(&mut stream, 4);
+        assert_eq!(stream.send_queue.peek().map(|p| *p.seq_no), Some(4));
     }
 
     #[test]
