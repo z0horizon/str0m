@@ -882,9 +882,9 @@ impl StreamTx {
         // exit via ? here is ok since that means there is nothing to send.
         // The packet remains in the head of the send queue until we
         // finish poll_packet, at which point we move it to the cache.
+        // The packet keeps the time it was queued at: send_queue.pop() subtracts its wait from
+        // the queue's total queue time, which the pacer drains the queue by.
         let pkt = self.send_queue.peek()?;
-
-        pkt.timestamp = now;
 
         let len = pkt.payload.len() as u64;
         self.stats.update_packet_counts(len, false);
@@ -1458,6 +1458,49 @@ mod test {
             assert!(header.ssrc.is_probe());
             assert!(header.has_padding);
         }
+    }
+
+    #[test]
+    fn queue_time_counts_only_unsent_packets_while_the_queue_never_empties() {
+        // A send queue that always holds a backlog, as on a link narrower than the media: one
+        // packet in and one out every 10 ms. The pacer drains at up to 10 Gbps once the average
+        // queue time reaches its 2 s limit, so the queue time must be the age of the packets
+        // still queued, not the wait of every packet sent since the queue was last empty.
+        let start = Instant::now();
+        let codecs = CodecConfig::new_with_defaults();
+        let pt = codecs.params()[0].pt();
+        let exts = ExtensionMap::standard();
+        let mut streams = crate::streams::Streams::new(false, 1200, Duration::from_millis(1500));
+        let stream = streams.declare_stream_tx(42.into(), None, MidRid("vid".into(), None));
+        let mut queued_at = VecDeque::new();
+        let mut seq_no = 0_u64;
+        let mut write = |stream: &mut StreamTx, now: Instant, queued_at: &mut VecDeque<Instant>| {
+            stream.write_rtp(RtpWrite::new(pt, seq_no.into(), 0, now, vec![0_u8; 1000]));
+            stream.send_queue.handle_timeout(now);
+            queued_at.push_back(now);
+            seq_no += 1;
+        };
+        for i in 0..5 {
+            write(
+                stream,
+                start + Duration::from_millis(i * 10),
+                &mut queued_at,
+            );
+        }
+        let mut buf = vec![];
+        let mut now = start;
+        for i in 5..205 {
+            now = start + Duration::from_millis(i * 10);
+            write(stream, now, &mut queued_at);
+            stream
+                .poll_packet(now, &exts, None, codecs.params(), &mut buf)
+                .expect("a queued packet to send");
+            queued_at.pop_front();
+        }
+        let expected: Duration = queued_at.iter().map(|t| now - *t).sum();
+        let snapshot = stream.queue_state(now).snapshot;
+        assert_eq!(snapshot.packet_count, 5);
+        assert_eq!(snapshot.total_queue_time(now), expected);
     }
 
     #[test]
