@@ -14,7 +14,7 @@ use crate::media::MediaKind;
 use crate::pacer::QueuePriority;
 use crate::pacer::QueueSnapshot;
 use crate::pacer::QueueState;
-use crate::packet::Vp8Patch;
+use crate::packet::{PayloadPatch, Vp8Patch};
 use crate::rtp_::MidRid;
 use crate::rtp_::{Bitrate, Descriptions, Extension, ExtensionMap, ExtensionValues, Frequency};
 use crate::rtp_::{MAX_BLANK_PADDING_PAYLOAD_SIZE, Sdes, SdesType};
@@ -210,6 +210,7 @@ pub struct RtpWrite {
     csrc_count: usize,
     csrc: [u32; 15],
     vp8_patch: Option<Vp8Patch>,
+    payload_patch: Option<PayloadPatch>,
 }
 
 impl RtpWrite {
@@ -260,6 +261,7 @@ impl RtpWrite {
             csrc_count: 0,
             csrc: [0; 15],
             vp8_patch: None,
+            payload_patch: None,
         }
     }
 
@@ -309,6 +311,12 @@ impl RtpWrite {
     /// constructing this write command.
     pub fn vp8_patch(mut self, patch: Vp8Patch) -> Self {
         self.vp8_patch = Some(patch);
+        self
+    }
+
+    /// Apply a codec-agnostic byte replacement patch during RTP serialization.
+    pub fn payload_patch(mut self, patch: PayloadPatch) -> Self {
+        self.payload_patch = Some(patch);
         self
     }
 }
@@ -467,6 +475,7 @@ impl StreamTx {
             csrc_count,
             csrc,
             vp8_patch,
+            payload_patch,
         } = rtp;
 
         let first_call = self.rtp_and_wallclock.is_none();
@@ -502,6 +511,7 @@ impl StreamTx {
             header,
             payload,
             vp8_patch,
+            payload_patch,
             nackable,
             essential,
             // The overall idea for str0m is to only drive time forward from handle_input. If we
@@ -706,6 +716,9 @@ impl StreamTx {
                     patch.copy_to(pkt.payload.as_ref(), &mut body_out[..body_len]);
                 } else {
                     body_out[..body_len].copy_from_slice(pkt.payload.as_ref());
+                }
+                if let Some(patch) = pkt.payload_patch.as_ref() {
+                    patch.apply(&mut body_out[..body_len]);
                 }
 
                 // media packets are sent unpadded: the SRTP ciphers handle
@@ -1653,11 +1666,91 @@ mod test {
             time: MediaTime::from_90khz(0),
             payload: vec![0u8; 100].into(),
             vp8_patch: None,
+            payload_patch: None,
             timestamp: now,
             last_sender_info: None,
             nackable: true,
             essential: false,
         }
+    }
+
+    #[test]
+    fn rtp_write_payload_patch_reaches_the_wire() {
+        let now = Instant::now();
+        let codecs = CodecConfig::new_with_defaults();
+        let pt = codecs
+            .params()
+            .iter()
+            .find(|p| p.resend().is_some())
+            .expect("video codec with RTX")
+            .pt();
+        let exts = ExtensionMap::standard();
+        let mut stream = StreamTx::new(
+            42.into(),
+            Some(44.into()),
+            MidRid(Mid::from("0"), None),
+            false,
+            1200,
+        );
+        let original: Arc<[u8]> = vec![0x88, 0x01, 0x02, 0x03, 0x04].into();
+        let mut patch = PayloadPatch::new();
+        patch.push(1, 0xaa).unwrap();
+        patch.push(2, 0xbb).unwrap();
+        stream.write_rtp(
+            RtpWrite::new(pt, 10.into(), 9000, now, Arc::clone(&original))
+                .nackable(true)
+                .payload_patch(patch),
+        );
+        stream.send_queue.handle_timeout(now);
+        let mut buf = vec![];
+        let receipt = stream
+            .poll_packet(now, &exts, None, codecs.params(), &mut buf)
+            .expect("packet emitted");
+        let wire_payload = &buf[receipt.header.header_len..];
+        assert_eq!(wire_payload, &[0x88, 0xaa, 0xbb, 0x03, 0x04]);
+        assert_eq!(&original[..], &[0x88, 0x01, 0x02, 0x03, 0x04]);
+    }
+
+    #[test]
+    fn resend_carries_the_payload_patch() {
+        let now = Instant::now();
+        let codecs = CodecConfig::new_with_defaults();
+        let pt = codecs
+            .params()
+            .iter()
+            .find(|p| p.resend().is_some())
+            .expect("video codec with RTX")
+            .pt();
+        let exts = ExtensionMap::standard();
+        let mut stream = StreamTx::new(
+            42.into(),
+            Some(44.into()),
+            MidRid(Mid::from("0"), None),
+            false,
+            1200,
+        );
+        let original: Arc<[u8]> = vec![0x88, 0x01, 0x02, 0x03, 0x04].into();
+        let mut patch = PayloadPatch::new();
+        patch.push(1, 0xaa).unwrap();
+        patch.push(2, 0xbb).unwrap();
+        stream.write_rtp(
+            RtpWrite::new(pt, 10.into(), 9000, now, Arc::clone(&original))
+                .nackable(true)
+                .payload_patch(patch),
+        );
+        stream.send_queue.handle_timeout(now);
+        let mut buf = vec![];
+        stream
+            .poll_packet(now, &exts, None, codecs.params(), &mut buf)
+            .expect("initial packet emitted");
+
+        stream.handle_nack([NackEntry { pid: 10, blp: 0 }].into_iter(), now, None);
+        let receipt = stream
+            .poll_packet(now, &exts, None, codecs.params(), &mut buf)
+            .expect("resend packet emitted");
+        let rtx_body = &buf[receipt.header.header_len..];
+        assert_eq!(&rtx_body[..2], &10u16.to_be_bytes());
+        assert_eq!(&rtx_body[2..], &[0x88, 0xaa, 0xbb, 0x03, 0x04]);
     }
 
     fn essential_packet(seq_no: u64, now: Instant) -> RtpPacket {

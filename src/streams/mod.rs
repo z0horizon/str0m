@@ -9,7 +9,7 @@ use crate::format::CodecConfig;
 use crate::format::PayloadParams;
 use crate::media::{KeyframeRequest, MID_PROBE, Media, SenderFeedback};
 use crate::pacer::QueueState;
-use crate::packet::Vp8Patch;
+use crate::packet::{PayloadPatch, Vp8Patch};
 use crate::rtp_::MidRid;
 use crate::rtp_::Ssrc;
 use crate::rtp_::{Bitrate, Pt};
@@ -60,6 +60,7 @@ pub struct RtpPacket {
     pub payload: Arc<[u8]>,
 
     vp8_patch: Option<Vp8Patch>,
+    payload_patch: Option<PayloadPatch>,
 
     /// str0m server timestamp.
     ///
@@ -116,6 +117,7 @@ impl RtpPacket {
             },
             payload: Arc::default(), // This payload is never used. See RtpHeader::create_padding_packet
             vp8_patch: None,
+            payload_patch: None,
             nackable: false,
             essential: false,
             last_sender_info: None,
