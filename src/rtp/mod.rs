@@ -3,7 +3,7 @@ pub(crate) use id::MidRid;
 pub use id::{Mid, Pt, Rid, SeqNo, SessionId, Ssrc, TwccClusterId, TwccSeq};
 
 mod ext;
-pub use ext::{AbsCaptureTime, UserExtensionValues, VideoOrientation};
+pub use ext::{AbsCaptureTime, InlineExtValue, UserExtensionValues, VideoOrientation};
 pub use ext::{Extension, ExtensionMap, ExtensionSerializer, ExtensionValues};
 
 mod dir;
