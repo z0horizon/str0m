@@ -49,6 +49,9 @@ mod red;
 pub(crate) use red::{MAX_RED_RECOVERY_DEPTH, RedSender, red_same_pt_blocks};
 pub use red::{RedBlock, RedDecoder, RedEncoder, RedundantBlock};
 
+mod payload_patch;
+pub use payload_patch::{PayloadPatch, PayloadPatchError};
+
 mod vp8;
 pub use vp8::Vp8CodecExtra;
 pub use vp8::Vp8Descriptor;

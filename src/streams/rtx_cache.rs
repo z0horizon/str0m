@@ -91,6 +91,7 @@ mod test {
             time: MediaTime::from_90khz(0),
             payload: millis.to_be_bytes().into(),
             vp8_patch: None,
+            payload_patch: None,
             timestamp: after(now, millis),
             last_sender_info: None,
             nackable: true,
