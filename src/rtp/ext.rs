@@ -123,7 +123,7 @@ pub trait ExtensionSerializer: Debug + Send + Sync + 'static {
     /// of bytes written. This can be 0 if the extension could not be serialized.
     fn write_to(&self, buf: &mut [u8], ev: &ExtensionValues) -> usize;
 
-    /// Parse a value and put it in the [`ExtensionValues::user_values`] field.
+    /// Parse a value and put it in [`ExtensionValues::user_inline`] or [`ExtensionValues::user_values`].
     fn parse_value(&self, buf: &[u8], ev: &mut ExtensionValues) -> bool;
 
     /// Tell if this extension should be used for video media.
@@ -923,8 +923,47 @@ pub struct ExtensionValues {
     #[doc(hidden)]
     pub frame_mark: Option<u32>,
 
+    /// Inline allocation-free user extension slot for [`ExtensionSerializer`].
+    pub user_inline: Option<InlineExtValue>,
+
     /// User values for [`ExtensionSerializer`] to parse into and write from.
     pub user_values: UserExtensionValues,
+}
+
+/// Fixed-capacity inline byte buffer (up to 32 bytes) for [`ExtensionValues::user_inline`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct InlineExtValue {
+    len: u8,
+    bytes: [u8; Self::CAPACITY],
+}
+
+impl InlineExtValue {
+    /// Maximum number of bytes stored inline.
+    pub const CAPACITY: usize = 32;
+
+    /// Create an inline extension value from `v`, or `None` if `v.len() > Self::CAPACITY`.
+    pub fn new(v: &[u8]) -> Option<Self> {
+        if v.len() > Self::CAPACITY {
+            return None;
+        }
+        let mut bytes = [0u8; Self::CAPACITY];
+        bytes[..v.len()].copy_from_slice(v);
+        Some(Self {
+            len: v.len() as u8,
+            bytes,
+        })
+    }
+
+    /// Return the stored bytes as a slice.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+}
+
+impl fmt::Debug for InlineExtValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_slice(), f)
+    }
 }
 impl ExtensionValues {
     pub(crate) fn update_absolute_send_time(&mut self, now: Instant) {
@@ -1132,6 +1171,9 @@ impl fmt::Debug for ExtensionValues {
         }
         if let Some(t) = &self.frame_mark {
             write!(f, " frame_mark: {t}")?;
+        }
+        if let Some(t) = &self.user_inline {
+            write!(f, " user_inline: {t:?}")?;
         }
 
         write!(f, " }}")?;
@@ -1610,5 +1652,88 @@ mod test {
                 assert_eq!(ev2.voice_activity, Some(voice_activity));
             }
         }
+    }
+
+    #[test]
+    fn inline_value_rejects_33_bytes() {
+        assert!(InlineExtValue::new(&[0xaa; 32]).is_some());
+        assert!(InlineExtValue::new(&[0xaa; 33]).is_none());
+    }
+
+    #[test]
+    fn inline_value_round_trips() {
+        let input = [1u8, 2, 3, 4, 5, 6, 7];
+        let v = InlineExtValue::new(&input).expect("fits in 32 bytes");
+        assert_eq!(v.as_slice(), &input);
+        assert_eq!(format!("{v:?}"), format!("{:?}", &input[..]));
+    }
+
+    #[test]
+    fn serializer_can_write_from_user_inline() {
+        #[derive(Debug)]
+        struct InlineTestSerializer;
+
+        impl ExtensionSerializer for InlineTestSerializer {
+            fn write_to(&self, buf: &mut [u8], ev: &ExtensionValues) -> usize {
+                let Some(inline) = ev.user_inline.as_ref() else {
+                    return 0;
+                };
+                let slice = inline.as_slice();
+                if buf.len() < slice.len() {
+                    return 0;
+                }
+                buf[..slice.len()].copy_from_slice(slice);
+                slice.len()
+            }
+
+            fn parse_value(&self, buf: &[u8], ev: &mut ExtensionValues) -> bool {
+                let Some(inline) = InlineExtValue::new(buf) else {
+                    return false;
+                };
+                ev.user_inline = Some(inline);
+                true
+            }
+
+            fn is_video(&self) -> bool {
+                true
+            }
+
+            fn is_audio(&self) -> bool {
+                false
+            }
+
+            fn requires_two_byte_form(&self, _ev: &ExtensionValues) -> bool {
+                true
+            }
+        }
+
+        let mut exts = ExtensionMap::empty();
+        exts.set(
+            15,
+            Extension::UnknownUri(
+                "urn:test:inline-ext".to_string(),
+                Arc::new(InlineTestSerializer),
+            ),
+        );
+
+        let payload = [0xde, 0xad, 0xbe, 0xef, 0x42];
+        let ev = ExtensionValues {
+            user_inline: InlineExtValue::new(&payload),
+            ..Default::default()
+        };
+
+        let mut buf = vec![0_u8; 16];
+        assert_eq!(ExtensionsForm::TwoByte, exts.form(&ev));
+        exts.write_to(&mut buf[..], &ev, ExtensionsForm::TwoByte);
+
+        let mut ev2 = ExtensionValues::default();
+        exts.parse(&buf, ExtensionsForm::TwoByte, &mut ev2);
+
+        assert_eq!(
+            ev2.user_inline.as_ref().map(|v| v.as_slice()),
+            Some(&payload[..])
+        );
+        assert_eq!(ev, ev2);
+        assert!(ev2.user_values.map.is_none());
     }
 }

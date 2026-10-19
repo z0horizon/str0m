@@ -779,7 +779,9 @@ pub mod rtp {
 
     /// Video Layers Allocation RTP Header Extension
     pub mod vla;
-    pub use crate::rtp_::{AbsCaptureTime, ExtensionValues, UserExtensionValues};
+    pub use crate::rtp_::{
+        AbsCaptureTime, ExtensionValues, InlineExtValue, UserExtensionValues,
+    };
     pub use crate::rtp_::{Extension, ExtensionMap, ExtensionSerializer};
 
     pub use crate::packet::{
@@ -2251,7 +2253,7 @@ mod test {
     #[test]
     fn event_is_reasonably_sized() {
         let n = std::mem::size_of::<Event>();
-        assert!(n < 490); // Increased to accommodate abs-capture-time fields in ExtensionValues
+        assert!(n < 536); // Increased to accommodate user_inline in ExtensionValues and payload_patch
     }
 }
 
