@@ -1,5 +1,6 @@
 # Unreleased
 
+  * Include authenticated early RTX padding in TWCC feedback and ingress loss accounting #1086
   * Reduce RTX receive memory use with a 128-position sequence window #1089
   * Round BWE send timestamps to milliseconds to reduce recovery-burst fragmentation #1074
   * Add `BweKind::ProbeResult` for probe results that raise the estimate
