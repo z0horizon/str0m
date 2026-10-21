@@ -57,6 +57,8 @@ pub struct RateControl {
     last_probe: Option<(Bitrate, Instant)>,
     /// The probe's bound on the current overuse episode, if a probe preceded it.
     episode_floor: Option<EpisodeFloor>,
+    /// Whether the sender is currently in an Application-Limited Region (ALR).
+    in_alr: bool,
 }
 
 impl RateControl {
@@ -76,6 +78,7 @@ impl RateControl {
             last_rtt: None,
             last_probe: None,
             episode_floor: None,
+            in_alr: false,
         }
     }
 
@@ -211,12 +214,13 @@ impl RateControl {
     /// proven capacity rather than slashing the estimate to 0.85x of the idle rate.
     pub fn set_in_alr(&mut self, in_alr: bool, now: Instant) {
         if in_alr {
-            let floor_rate = self
-                .last_probe
-                .map(|(probe, _)| probe.min(self.estimated_bitrate))
-                .unwrap_or(self.estimated_bitrate);
-            self.last_probe = Some((floor_rate, now));
+            if !self.in_alr && self.last_probe.is_none() && self.episode_floor.is_none() {
+                self.last_probe = Some((self.estimated_bitrate, now));
+            } else if let Some((probe, _)) = self.last_probe {
+                self.last_probe = Some((probe.min(self.estimated_bitrate), now));
+            }
         }
+        self.in_alr = in_alr;
     }
 
     fn increase(&mut self, observed_bitrate: Bitrate, now: Instant) {
@@ -777,6 +781,42 @@ mod test {
                 now + duration_ms(4050),
             );
             assert_eq!(rate_controller.estimated_bitrate().as_u64(), 2_550_000);
+        }
+
+        #[test]
+        fn overuse_during_or_after_alr_cuts_when_episode_exceeds_max_or_repeats() {
+            let now = Instant::now();
+            let mut rate_controller = make_control(500_000);
+            rate_controller.update(Signal::Normal, 2_500_000.into(), None, now);
+            rate_controller.set_probe_result(3_000_000.into(), now + duration_ms(100));
+
+            rate_controller.set_in_alr(true, now + duration_ms(1000));
+            // First overuse episode while still in ALR consumes `last_probe` and is bounded to 0.85x.
+            rate_controller.update(
+                Signal::Overuse,
+                600_000.into(),
+                None,
+                now + duration_ms(1100),
+            );
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 2_550_000);
+
+            // Staying in ALR (`in_alr == true`) must NOT re-mint `last_probe` after it was consumed.
+            rate_controller.set_in_alr(true, now + duration_ms(1200));
+            rate_controller.update(
+                Signal::Normal,
+                600_000.into(),
+                None,
+                now + duration_ms(1200),
+            );
+            rate_controller.set_in_alr(true, now + duration_ms(1400));
+            rate_controller.update(
+                Signal::Overuse,
+                600_000.into(),
+                None,
+                now + duration_ms(1400),
+            );
+            // Second episode cuts all the way to 0.85 * 600_000 = 510_000.
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 510_000);
         }
     }
 

@@ -55,13 +55,9 @@ impl AckedBitrateEstimator {
     }
 
     /// Increases the estimator variance so the filter adapts quickly after an ALR exit
-    /// (matches libwebrtc's `BitrateEstimator::ExpectFastRateChange`), and resets any partial
-    /// window accumulated during ALR so the first post-ALR sample is not diluted by idle time.
+    /// (matches libwebrtc's `BitrateEstimator::ExpectFastRateChange`).
     pub(super) fn expect_fast_rate_change(&mut self) {
         self.estimate_var += 200.0;
-        self.sum = DataSize::ZERO;
-        self.current_window = Duration::ZERO;
-        self.last_update = None;
     }
 
     pub(super) fn update_packet(
@@ -71,7 +67,7 @@ impl AckedBitrateEstimator {
         packet_size: DataSize,
     ) {
         if let Some(alr_ended) = self.alr_ended_time {
-            if send_time > alr_ended {
+            if send_time >= alr_ended {
                 self.expect_fast_rate_change();
                 self.alr_ended_time = None;
             }
@@ -99,11 +95,13 @@ impl AckedBitrateEstimator {
             return;
         };
 
-        // While application-limited (ALR), small samples (< 2000 B per 150 ms window, such as
-        // 50 kbps keep-alive padding or 1 fps static screen refresh frames) reflect the idle
-        // application rate rather than link capacity. Do not let them decay the prior estimate
-        // or collapse `estimate_var`.
-        if self.in_alr && is_small_sample && sample_estimate < estimate {
+        // While application-limited (ALR) or waiting for the first non-trivial window after
+        // `expect_fast_rate_change`, small samples (< 2000 B per 150 ms window, such as 50 kbps
+        // keep-alive padding or a residual 1-packet pre-ALR tail window closing as the first
+        // post-ALR packet arrives) reflect the idle application rate rather than link capacity.
+        // Do not let them decay the prior estimate or consume the fast-rate-change `estimate_var`.
+        if (self.in_alr || self.estimate_var > 50.0) && is_small_sample && sample_estimate < estimate
+        {
             return;
         }
 
