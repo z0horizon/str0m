@@ -171,6 +171,8 @@ struct SendSideBandwidthEstimator {
     last_updated_estimate: Option<Bitrate>,
     /// A probe result was applied by `update` since `take_probe_applied`.
     probe_applied: bool,
+    /// Whether the estimator was in ALR on the previous update/timeout.
+    was_in_alr: bool,
 }
 
 impl SendSideBandwidthEstimator {
@@ -199,6 +201,7 @@ impl SendSideBandwidthEstimator {
             link_capacity_estimator: LinkCapacityEstimator::new(),
             last_updated_estimate: None,
             probe_applied: false,
+            was_in_alr: false,
         }
     }
 
@@ -215,7 +218,15 @@ impl SendSideBandwidthEstimator {
     /// Should be called for media packets (not padding/probes).
     /// This is typically called from the session's packet sending logic.
     pub fn on_media_sent(&mut self, bytes: DataSize, now: Instant) {
+        let was_in_alr = self.alr_detector.alr_start_time().is_some();
         self.alr_detector.on_bytes_sent(bytes, now);
+        let in_alr = self.alr_detector.alr_start_time().is_some();
+        if (was_in_alr || self.was_in_alr) && !in_alr {
+            self.acked_bitrate_estimator.set_alr_ended_time(now);
+        }
+        self.acked_bitrate_estimator.set_alr(in_alr);
+        self.delay_controller.set_in_alr(in_alr, now);
+        self.was_in_alr = in_alr;
     }
 
     /// Record a packet from a TWCC report.
@@ -256,8 +267,11 @@ impl SendSideBandwidthEstimator {
         acked_packets.sort_by(AckedPacket::order_by_receive_time);
 
         for acked_packet in acked_packets.iter() {
-            self.acked_bitrate_estimator
-                .update(acked_packet.remote_recv_time, acked_packet.size);
+            self.acked_bitrate_estimator.update_packet(
+                acked_packet.local_send_time,
+                acked_packet.remote_recv_time,
+                acked_packet.size,
+            );
         }
 
         let acked_bitrate = self.acked_bitrate_estimator.current_estimate();
@@ -344,8 +358,17 @@ impl SendSideBandwidthEstimator {
             self.alr_detector.handle_timeout(now);
         }
 
-        // Get ALR state and forward to both probe control and loss controller
+        // Get ALR state and forward to probe control, loss controller, acked bitrate
+        // estimator, and delay controller.
         let alr_start_time = self.alr_detector.alr_start_time();
+        let in_alr = alr_start_time.is_some();
+        if self.was_in_alr && !in_alr {
+            self.acked_bitrate_estimator.set_alr_ended_time(now);
+        }
+        self.acked_bitrate_estimator.set_alr(in_alr);
+        self.delay_controller.set_in_alr(in_alr, now);
+        self.was_in_alr = in_alr;
+
         if let Some(t) = alr_start_time {
             self.probe_control.set_alr_start_time(t);
         } else {
