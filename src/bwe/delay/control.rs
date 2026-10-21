@@ -121,14 +121,10 @@ impl DelayController {
             // We haven't received a TWCC report in a while. The trendline hypothesis can
             // no longer be considered valid. We need another TWCC report before we can update
             // estimates.
-            let next_timeout_in = self
-                .get_smoothed_rtt()
-                .unwrap_or(MAX_TWCC_GAP)
-                .min(UPDATE_INTERVAL);
-
+            //
             // Set this even if we didn't update, otherwise we get stuck in a poll -> handle loop
-            // that starves the run loop.
-            self.next_timeout = now + next_timeout_in;
+            // that starves the run loop. Matches `update_estimate` cadence (`UPDATE_INTERVAL`).
+            self.next_timeout = now + UPDATE_INTERVAL;
             return;
         }
 
@@ -226,7 +222,7 @@ impl DelayController {
         now.duration_since(self.last_twcc_report)
             <= self
                 .get_smoothed_rtt()
-                .map(|rtt| rtt * 2)
+                .map(|rtt| (rtt * 2).max(UPDATE_INTERVAL))
                 .unwrap_or(MAX_TWCC_GAP)
                 .min(UPDATE_INTERVAL * 2)
     }
@@ -261,6 +257,39 @@ mod test {
         assert!(
             c.last_estimate() > after_report,
             "a due timeout still updates"
+        );
+    }
+
+    #[test]
+    fn expired_hypothesis_advances_timeout_by_update_interval_even_with_zero_rtt() {
+        use crate::rtp_::DataSize;
+
+        let now = Instant::now();
+        let mut c = DelayController::new(Bitrate::kbps(500));
+
+        // 1. Before any TWCC report (smoothed_rtt == None), expired hypothesis advances by UPDATE_INTERVAL.
+        c.handle_timeout(None, now);
+        assert_eq!(c.poll_timeout(), now + UPDATE_INTERVAL);
+
+        // 2. Feed an AckedPacket with 0ms RTT (loopback), then jump past the hypothesis validity window.
+        let zero_rtt_pkt = AckedPacket {
+            seq_no: 1u64.into(),
+            size: DataSize::bytes(1200),
+            local_send_time: now,
+            remote_recv_time: now,
+            local_recv_time: now,
+        };
+        c.update(&[zero_rtt_pkt], Some(Bitrate::kbps(500)), None, now);
+        assert_eq!(c.get_smoothed_rtt(), Some(Duration::ZERO));
+
+        // Jump 100ms ahead so trendline_hypothesis_valid(late) is false.
+        let late = now + Duration::from_millis(100);
+        assert!(!c.trendline_hypothesis_valid(late));
+        c.handle_timeout(None, late);
+        assert_eq!(
+            c.poll_timeout(),
+            late + UPDATE_INTERVAL,
+            "expired hypothesis must advance next_timeout by UPDATE_INTERVAL (25ms), never spinning on 0ms RTT"
         );
     }
 }

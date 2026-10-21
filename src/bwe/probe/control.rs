@@ -567,6 +567,14 @@ impl ProbeControl {
             return;
         }
 
+        // A probe below the current estimate would pace outgoing packets below the already
+        // estimated capacity (except LargeDrop, which intentionally probes below pre-drop).
+        if kind != ProbeKind::LargeDrop
+            && self.last_estimate.is_some_and(|est| bitrate <= est)
+        {
+            return;
+        }
+
         let cluster_id = self.next_cluster_id.inc();
 
         let config = ProbeClusterConfig::new(cluster_id, bitrate, kind)
@@ -1127,5 +1135,19 @@ mod test {
             probe.is_some(),
             "Should continue periodic probing in ALR even when estimate >= max_bitrate"
         );
+    }
+
+    #[test]
+    fn initial_probe_capped_at_or_below_estimate_is_not_queued() {
+        let mut pc = ProbeControl::new();
+        pc.enable(true);
+        let now = Instant::now();
+
+        // When the application resets BWE to a high estimate (e.g. 10 Gbps) while desired_bitrate
+        // is low (e.g. 1 bps), 2× desired (clamped to 5 kbps minimum) is far below the estimate.
+        // Queueing a 5 kbps initial probe would throttle the pacer to 5 kbps during the cluster.
+        pc.set_desired_bitrate(Bitrate::bps(1));
+        pc.set_estimated_bitrate(Bitrate::gbps(10), BandwidthLimitedCause::DelayBasedLimited);
+        assert!(pc.handle_timeout(now).is_none());
     }
 }
