@@ -198,8 +198,25 @@ impl RateControl {
         self.update_estimate(probe_bitrate, now);
         self.last_probe = Some((probe_bitrate, now));
 
-        // Do NOT change self.state - keep current state to match WebRTC behavior.
-        // Changing state here could trigger unintended AIMD decrease/increase logic.
+        // Do NOT change self.state - keep current state to avoid triggering unintended AIMD behavior.
+    }
+
+    /// Updates ALR state on the rate controller.
+    ///
+    /// While the sender is in ALR (e.g. a static screen share), the application is voluntarily
+    /// sending far below `estimated_bitrate`, so `observed_bitrate` reflects the idle rate rather
+    /// than link capacity. Keeping the proven estimate floor fresh across the ALR window ensures
+    /// that when the application resumes sending in a step (exiting ALR), the brief self-induced
+    /// trendline overuse before the first 150 ms acked-bitrate window fills is bounded by the
+    /// proven capacity rather than slashing the estimate to 0.85x of the idle rate.
+    pub fn set_in_alr(&mut self, in_alr: bool, now: Instant) {
+        if in_alr {
+            let floor_rate = self
+                .last_probe
+                .map(|(probe, _)| probe.min(self.estimated_bitrate))
+                .unwrap_or(self.estimated_bitrate);
+            self.last_probe = Some((floor_rate, now));
+        }
     }
 
     fn increase(&mut self, observed_bitrate: Bitrate, now: Instant) {
@@ -723,6 +740,43 @@ mod test {
                 now + duration_ms(2500),
             );
             assert_eq!(rate_controller.estimated_bitrate().as_u64(), 510_000);
+        }
+
+        /// While in ALR (e.g. a static screen share), the application sends almost nothing for
+        /// seconds at a time, so `observed_bitrate` decays to the keep-alive padding rate. When
+        /// the user scrolls again, the step from idle to full media rate induces a brief
+        /// trendline overuse before a 150 ms acked-bitrate window can fill. The proven estimate
+        /// from before/during ALR must still bound that first post-ALR overuse episode even if
+        /// the last probe was more than `PROBE_FLOOR_WINDOW` (2 s) ago.
+        #[test]
+        fn overuse_on_alr_exit_long_after_probe_is_bounded_by_alr_floor() {
+            let now = Instant::now();
+            let mut rate_controller = make_control(500_000);
+            rate_controller.update(Signal::Normal, 2_500_000.into(), None, now);
+            rate_controller.set_probe_result(3_000_000.into(), now + duration_ms(100));
+
+            // Stay in ALR for 4 seconds (past the 2s PROBE_FLOOR_WINDOW) while observed_bitrate
+            // decays to 400 kbps from keep-alive padding.
+            for ms in (200..=4000).step_by(100) {
+                rate_controller.set_in_alr(true, now + duration_ms(ms));
+                rate_controller.update(
+                    Signal::Normal,
+                    400_000.into(),
+                    None,
+                    now + duration_ms(ms),
+                );
+            }
+
+            // User scrolls at t = 4050ms, exiting ALR and triggering a brief self-induced Overuse
+            // while observed_bitrate is still 400 kbps.
+            rate_controller.set_in_alr(false, now + duration_ms(4050));
+            rate_controller.update(
+                Signal::Overuse,
+                400_000.into(),
+                None,
+                now + duration_ms(4050),
+            );
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 2_550_000);
         }
     }
 

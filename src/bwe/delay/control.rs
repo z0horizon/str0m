@@ -150,6 +150,11 @@ impl DelayController {
         self.trendline_estimator.hypothesis() == BandwidthUsage::Overuse
     }
 
+    /// Forwards current ALR state to the underlying rate controller.
+    pub fn set_in_alr(&mut self, in_alr: bool, now: Instant) {
+        self.rate_control.set_in_alr(in_alr, now);
+    }
+
     /// Update smoothed RTT using EWMA (RFC 6298, alpha = 1/8).
     fn update_rtt(&mut self, rtt: Duration) {
         // Keep history as fallback in case smoothed RTT is not yet available
