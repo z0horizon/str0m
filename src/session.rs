@@ -1365,6 +1365,7 @@ impl Session {
     pub fn reset_bwe(&mut self, init_bitrate: Bitrate) {
         if let Some(bwe) = self.bwe.as_mut() {
             bwe.reset(init_bitrate);
+            self.configure_pacer();
         }
     }
 
@@ -1588,5 +1589,39 @@ mod tests {
             un_red(&mut header, &data, expected_primary_pt).is_none(),
             "RED associated with Opus must not reinterpret a PCMU primary block as Opus"
         );
+    }
+
+    #[test]
+    fn reset_bwe_updates_pacer_pacing_rate() {
+        let cfg = RtcConfig::default().enable_bwe(Some(Bitrate::kbps(300)));
+        let mut s = Session::new(&cfg);
+        s.reset_bwe(Bitrate::gbps(10));
+        let now = Instant::now();
+        let _ = s.pacer.handle_timeout(now, std::iter::empty());
+        // After reset_bwe(10 Gbps), configure_pacer() must have propagated 10 Gbps * 1.1 to the pacer.
+        s.pacer.register_send(
+            now,
+            crate::rtp_::DataSize::bytes(50_000),
+            crate::rtp_::MidRid(Mid::from("0"), None),
+        );
+        // At 10 Gbps, 50_000 bytes (400_000 bits) drains in 40 µs; at the old 300 kbps (330 kbps paced)
+        // it would take > 1.2 s (exceeding PACING = 40 ms burst interval).
+        let qs = crate::pacer::QueueState {
+            midrid: crate::rtp_::MidRid(Mid::from("0"), None),
+            unpaced: false,
+            use_for_padding: false,
+            snapshot: crate::pacer::QueueSnapshot {
+                created_at: now,
+                packet_count: 1,
+                byte_size: 1200,
+                total_queue_time_origin: Duration::ZERO,
+                last_emitted: Some(now),
+                first_unsent: Some(now),
+                priority: crate::pacer::QueuePriority::Media,
+            },
+        };
+        let t = now + std::time::Duration::from_millis(1);
+        let _ = s.pacer.handle_timeout(t, std::iter::once(qs));
+        assert_eq!(s.pacer.poll_timeout().0, Some(t));
     }
 }
