@@ -168,7 +168,8 @@ struct SendSideBandwidthEstimator {
     started_at: Option<Instant>,
     alr_detector: AlrDetector,
     link_capacity_estimator: LinkCapacityEstimator,
-    last_updated_estimate: Option<Bitrate>,
+    /// The estimate and its cause last handed to the probe control and the ALR detector.
+    last_updated_estimate: Option<(Bitrate, BandwidthLimitedCause)>,
     /// A probe result was applied by `update` since `take_probe_applied`.
     probe_applied: bool,
     /// Whether the estimator was in ALR on the previous update/timeout.
@@ -404,18 +405,23 @@ impl SendSideBandwidthEstimator {
         let Some(estimate) = self.last_estimate() else {
             return;
         };
-        // Did it change?
-        if self.last_updated_estimate == Some(estimate) {
+        let cause = self.bandwidth_limited_cause();
+        self.propagate(estimate, cause);
+    }
+
+    fn propagate(&mut self, estimate: Bitrate, cause: BandwidthLimitedCause) {
+        // Did it change? The cause alone can change while the estimate holds: the probe control
+        // does not probe while it last saw the delay increasing, so a stale cause from the last
+        // change of the estimate would keep blocking every probe.
+        if self.last_updated_estimate == Some((estimate, cause)) {
             return;
         }
-
-        let cause = self.bandwidth_limited_cause();
 
         self.probe_control.set_estimated_bitrate(estimate, cause);
         self.alr_detector.set_estimated_bitrate(estimate);
 
         // Don't update until this changes.
-        self.last_updated_estimate = Some(estimate);
+        self.last_updated_estimate = Some((estimate, cause));
     }
 
     fn bandwidth_limited_cause(&self) -> BandwidthLimitedCause {
@@ -558,6 +564,34 @@ impl fmt::Display for BandwidthUsage {
             BandwidthUsage::Normal => write!(f, "normal"),
             BandwidthUsage::Underuse => write!(f, "underuse"),
         }
+    }
+}
+
+#[cfg(test)]
+mod propagate_test {
+    use super::*;
+
+    #[test]
+    fn a_cause_change_alone_reaches_the_probe_control() {
+        let now = Instant::now();
+        let mut bwe = SendSideBandwidthEstimator::new(Bitrate::kbps(500));
+        bwe.probe_control.enable(true);
+        bwe.probe_control.set_desired_bitrate(Bitrate::mbps(3));
+
+        // The estimate last changed while the delay was increasing, then held while the
+        // overuse cleared.
+        bwe.propagate(
+            Bitrate::kbps(500),
+            BandwidthLimitedCause::DelayBasedLimitedDelayIncreased,
+        );
+        bwe.propagate(Bitrate::kbps(500), BandwidthLimitedCause::DelayBasedLimited);
+
+        bwe.request_probe(Bitrate::mbps(1), now);
+        let probe = bwe
+            .probe_control
+            .handle_timeout(now)
+            .expect("the requested probe");
+        assert_eq!(probe.target_bitrate(), Bitrate::mbps(1));
     }
 }
 
