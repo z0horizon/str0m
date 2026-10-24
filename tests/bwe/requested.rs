@@ -2,8 +2,8 @@
 //!
 //! The scenario: after a bandwidth dip, a sender keeps running a low layer while it wants the
 //! top layer. Its media rate is too low for the delay-based estimate to grow (an increase is
-//! capped at 1.5x the acknowledged rate), so the estimate stays near 700 kbps on a 3 Mbps link
-//! until the next periodic ALR probe, seconds later. An application that knows it is short can
+//! capped at 1.5x the acknowledged rate), so the estimate stays around 560 kbps on a 3 Mbps link
+//! until a built-in probe gets it out, seconds later. An application that knows it is short can
 //! probe, or pad, at once.
 
 use std::time::Duration;
@@ -11,6 +11,7 @@ use std::time::Duration;
 use netem::{DataSize, NetemConfig};
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::{Event, RtcError};
+use tracing::info;
 
 use crate::common::{
     BweTestContext, TestRtc, connect_with_bwe, get_last_bwe_estimate, init_crypto_default, init_log,
@@ -128,7 +129,7 @@ fn requested_probe_recovers_the_estimate_sooner() -> Result<(), RtcError> {
 
     let without = recover(|_, _| {})?;
     let with = recover(|l, estimate| l.bwe().request_probe(estimate * 2.0))?;
-    println!(
+    info!(
         "without {:?}, with {:?} (probes {:?})",
         without.elapsed, with.elapsed, with.probes
     );
@@ -155,7 +156,7 @@ fn padding_target_recovers_the_estimate_sooner() -> Result<(), RtcError> {
 
     let without = recover(|_, _| {})?;
     let with = recover(|l, _| l.bwe().set_padding_target(Some(RECOVERED)))?;
-    println!("without {:?}, with {:?}", without.elapsed, with.elapsed);
+    info!("without {:?}, with {:?}", without.elapsed, with.elapsed);
 
     let without = without.elapsed.expect("str0m recovers on its own, later");
     let with = with.elapsed.expect("padding recovers the estimate");

@@ -30,7 +30,6 @@ impl PacerControl {
         }
     }
 
-    /// Pad up to `target` (never above the estimate) instead of the keep-alive rate.
     pub fn set_padding_target(&mut self, target: Option<Bitrate>) {
         self.padding_target = target;
     }
@@ -41,7 +40,8 @@ impl PacerControl {
         estimate: Bitrate,
         is_overuse: bool,
     ) -> PacingResult {
-        // ALR periodic probes handle bandwidth discovery, not continuous padding.
+        // ALR periodic probes handle bandwidth discovery, not continuous padding, unless the
+        // application sets a padding target.
         let padding_rate = if is_overuse {
             // No padding during overuse
             Bitrate::ZERO

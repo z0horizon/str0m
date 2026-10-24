@@ -73,11 +73,14 @@ impl<'a> Bwe<'a> {
 
     /// Ask for a probe cluster at `target` (capped at twice the desired bitrate).
     ///
-    /// The built-in probe triggers only fire in the application-limited region every 5 s, or
-    /// after the estimate has stagnated for 15 s. An application that knows it is short of
-    /// bandwidth for the next quality step, and that the link is not losing packets, can probe
-    /// for that step at once instead. A successful result raises the estimate as any probe does.
-    /// Has no effect unless BWE is enabled and padding can be sent.
+    /// For an application that knows it is short of bandwidth for its next quality step and
+    /// does not want to wait for the built-in triggers (ALR every 5 s, or a stagnant estimate
+    /// after 15 s).
+    ///
+    /// **Note:** This only has an effect if BWE has been enabled via
+    /// [`RtcConfig::enable_bwe`][crate::RtcConfig::enable_bwe] and padding can be sent. The
+    /// request is dropped when a built-in probe would not run either, while another probe is
+    /// pending or awaits its result, and when the capped target is not above the estimate.
     pub fn request_probe(&mut self, target: Bitrate) {
         let now = self.0.last_now;
         self.0.session.request_bwe_probe(target, now);
@@ -85,11 +88,12 @@ impl<'a> Bwe<'a> {
 
     /// Let padding fill the total send rate up to `target` (capped by the current estimate).
     ///
-    /// By default str0m pads to about 50 kbps when media is flowing. Before stepping up to a
-    /// higher simulcast or SVC layer, an application can set the target to what it will send
-    /// after the step, so the rate the receiver acknowledges is already there when it takes the
-    /// step; otherwise the step, read as overuse, cuts the estimate to below the old rate.
-    /// `None` returns to the default. Padding still stops during overuse.
+    /// The default is about 50 kbps. Before stepping up to a higher layer, an application can
+    /// pad up to what it will send after the step. `None` returns to the default.
+    ///
+    /// **Note:** This only has an effect if BWE has been enabled via
+    /// [`RtcConfig::enable_bwe`][crate::RtcConfig::enable_bwe] and a negotiated sending media is
+    /// active. Padding still stops during overuse, and the target is kept across [`Bwe::reset`].
     pub fn set_padding_target(&mut self, target: Option<Bitrate>) {
         self.0.session.set_bwe_padding_target(target);
     }

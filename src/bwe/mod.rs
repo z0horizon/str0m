@@ -91,7 +91,9 @@ impl Bwe {
     }
 
     pub fn request_probe(&mut self, target: Bitrate, now: Instant) {
-        self.bwe.request_probe(target, now);
+        // The probe control learns the desired bitrate at the next timeout; a request made right
+        // after raising it must already be capped by the new value.
+        self.bwe.request_probe(target, self.desired_bitrate, now);
     }
 
     pub fn update<'t>(
@@ -177,10 +179,6 @@ struct SendSideBandwidthEstimator {
 }
 
 impl SendSideBandwidthEstimator {
-    pub fn request_probe(&mut self, target: Bitrate, now: Instant) {
-        self.probe_control.request_probe(target, now);
-    }
-
     pub fn new(initial_bitrate: Bitrate) -> Self {
         let mut alr_detector = AlrDetector::new();
         alr_detector.set_estimated_bitrate(initial_bitrate);
@@ -486,6 +484,11 @@ impl SendSideBandwidthEstimator {
     pub fn take_probe_applied(&mut self) -> bool {
         std::mem::take(&mut self.probe_applied)
     }
+
+    pub fn request_probe(&mut self, target: Bitrate, desired: Bitrate, now: Instant) {
+        self.probe_control.set_desired_bitrate(desired);
+        self.probe_control.request_probe(target, now);
+    }
 }
 
 /// A RTP packet that has been sent and acknowledged by the receiver in a TWCC report.
@@ -586,7 +589,7 @@ mod propagate_test {
         );
         bwe.propagate(Bitrate::kbps(500), BandwidthLimitedCause::DelayBasedLimited);
 
-        bwe.request_probe(Bitrate::mbps(1), now);
+        bwe.request_probe(Bitrate::mbps(1), Bitrate::mbps(3), now);
         let probe = bwe
             .probe_control
             .handle_timeout(now)
@@ -615,5 +618,30 @@ mod estimate_report_test {
         // No estimate keeps the last reported value.
         assert_eq!(report_if_changed(&mut last, None), None);
         assert_eq!(last, Some(Bitrate::kbps(810)));
+    }
+}
+
+#[cfg(test)]
+mod request_probe_test {
+    use super::*;
+
+    #[test]
+    fn a_request_right_after_raising_desired_is_capped_by_the_new_value() {
+        let now = Instant::now();
+        let mut bwe = SendSideBandwidthEstimator::new(Bitrate::kbps(700));
+        bwe.probe_control.enable(true);
+        bwe.probe_control.set_desired_bitrate(Bitrate::mbps(1));
+        bwe.probe_control
+            .set_estimated_bitrate(Bitrate::kbps(700), BandwidthLimitedCause::DelayBasedLimited);
+        while bwe.probe_control.handle_timeout(now).is_some() {}
+
+        // The old desired (1 Mbps) would cap this at 2 Mbps.
+        let later = now + Duration::from_secs(2);
+        bwe.request_probe(Bitrate::kbps(2_500), Bitrate::mbps(3), later);
+        let probe = bwe
+            .probe_control
+            .handle_timeout(later)
+            .expect("the requested probe");
+        assert_eq!(probe.target_bitrate(), Bitrate::kbps(2_500));
     }
 }
