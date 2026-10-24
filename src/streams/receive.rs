@@ -93,6 +93,9 @@ pub struct StreamRx {
     /// If we have a pending REMB request to send.
     pending_request_remb: Option<Bitrate>,
 
+    /// Lowest fraction lost for the next receiver report, see `report_fraction_lost_at_least`.
+    report_fraction_lost_floor: Option<u8>,
+
     /// Sequence number of the next FIR.
     fir_seq_no: u8,
 
@@ -178,6 +181,7 @@ impl StreamRx {
             last_time: None,
             pending_request_keyframe: None,
             pending_request_remb: None,
+            report_fraction_lost_floor: None,
             fir_seq_no: 0,
             last_receiver_report: already_happened(),
             stats: StreamRxStats::default(),
@@ -246,6 +250,21 @@ impl StreamRx {
     /// * bitrate Bitrate.
     pub fn request_remb(&mut self, bitrate: Bitrate) {
         self.pending_request_remb = Some(bitrate);
+    }
+
+    /// Raise the fraction lost of the next receiver report for this stream to at least
+    /// `fraction_lost` (the RFC 3550 8-bit fraction).
+    ///
+    /// An SFU uses this to tell a sender about the loss its forwarded media meets on the way to
+    /// the receivers, so the sender's encoder can protect against it (libwebrtc feeds the
+    /// reported fraction into Opus as the expected packet loss, which drives in-band FEC). Calls
+    /// before a report keep the highest value; the report after that is not affected, and the
+    /// stream's own stats keep the loss measured on this leg.
+    pub fn report_fraction_lost_at_least(&mut self, fraction_lost: u8) {
+        self.report_fraction_lost_floor = Some(
+            self.report_fraction_lost_floor
+                .map_or(fraction_lost, |f| f.max(fraction_lost)),
+        );
     }
 
     /// Suppress NACK sending.
@@ -731,6 +750,13 @@ impl StreamRx {
             self.stats.update_loss(report.fraction_lost);
             self.stats.jitter = report.jitter;
         }
+        if let Some(floor) = self.report_fraction_lost_floor.take() {
+            if !rr.reports.is_empty() {
+                let mut report = rr.reports[0];
+                report.fraction_lost = report.fraction_lost.max(floor);
+                rr.reports = report.into();
+            }
+        }
 
         let xr = self.create_extended_receiver_report(now, sender_ssrc);
 
@@ -1088,6 +1114,47 @@ mod tests {
             stream.update_register(now, &header, Frequency::FORTY_EIGHT_KHZ, false, seq_no);
         }
         stream
+    }
+
+    fn sent_fraction_lost(stream: &mut StreamRx) -> u8 {
+        let mut feedback = VecDeque::new();
+        stream.create_rr_and_update(already_happened(), 1.into(), &mut feedback);
+        let Some(Rtcp::ReceiverReport(rr)) = feedback.front() else {
+            panic!("expected a receiver report first");
+        };
+        rr.reports[0].fraction_lost
+    }
+
+    #[test]
+    fn receiver_report_carries_a_reported_loss_floor_once() {
+        let mut stream = stream_with(&[(1, 0), (2, 960), (3, 1920)]);
+        stream.report_fraction_lost_at_least(64);
+        stream.report_fraction_lost_at_least(32);
+
+        assert_eq!(
+            sent_fraction_lost(&mut stream),
+            64,
+            "the highest floor since the last report"
+        );
+        assert_eq!(
+            stream.stats.loss,
+            Some(0.0),
+            "the stream's own stats keep its measured loss"
+        );
+        assert_eq!(
+            sent_fraction_lost(&mut stream),
+            0,
+            "the floor covers one report only"
+        );
+    }
+
+    #[test]
+    fn receiver_report_keeps_measured_loss_above_the_floor() {
+        // 2 of 4 expected packets arrive: 50 % loss, fraction 128.
+        let mut stream = stream_with(&[(1, 0), (4, 2880)]);
+        stream.report_fraction_lost_at_least(10);
+
+        assert_eq!(sent_fraction_lost(&mut stream), 128);
     }
 
     #[test]
