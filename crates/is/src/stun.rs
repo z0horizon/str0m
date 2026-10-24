@@ -144,27 +144,30 @@ impl<'a> StunMessage<'a> {
         let method = Method::from_typ(typ);
         let trans_id = TransId::from_slice(&buf[8..20]);
 
-        let mut message_integrity_offset = 0;
+        // None when there is no MESSAGE-INTEGRITY: offset 0 is a valid position (the first
+        // attribute), not "absent".
+        let mut message_integrity_offset = None;
 
         let attrs = Attributes::parse(&buf[20..], trans_id, &mut message_integrity_offset)?;
 
         // length including message integrity attribute
-        let (integrity_len, integrity) = if message_integrity_offset > 0 {
-            let integrity_len = (message_integrity_offset + 4 + 20) as u16;
+        let (integrity_len, integrity) =
+            if let Some(message_integrity_offset) = message_integrity_offset {
+                let integrity_len = (message_integrity_offset + 4 + 20) as u16;
 
-            // password as key is called "short-term credentials"
-            // buffer from beginning including header (+20) to where message-integrity starts.
-            let integrity = &buf[0..(message_integrity_offset + 20)];
+                // password as key is called "short-term credentials"
+                // buffer from beginning including header (+20) to where message-integrity starts.
+                let integrity = &buf[0..(message_integrity_offset + 20)];
 
-            (integrity_len, integrity)
-        } else {
-            (0_u16, [].as_slice())
-        };
+                (integrity_len, integrity)
+            } else {
+                (0_u16, [].as_slice())
+            };
 
         if method == Method::Binding && class == Class::Success {
             // // message-integrity only includes the length up until and including
             // // the message-integrity attribute.
-            if message_integrity_offset == 0 {
+            if message_integrity_offset.is_none() {
                 return Err(StunError::Parse(
                     "No message integrity in incoming STUN binding reply".into(),
                 ));
@@ -176,7 +179,7 @@ impl<'a> StunMessage<'a> {
         } else if method == Method::Binding && class == Class::Request {
             // // message-integrity only includes the length up until and including
             // // the message-integrity attribute.
-            if message_integrity_offset == 0 {
+            if message_integrity_offset.is_none() {
                 return Err(StunError::Parse(
                     "No message integrity in incoming STUN binding request".into(),
                 ));
@@ -390,20 +393,24 @@ impl<'a> StunMessage<'a> {
     /// Verify the integrity of this message against the provided password.
     #[must_use]
     pub fn verify(&self, password: &[u8], sha1_hmac: impl Fn(&[u8], &[&[u8]]) -> [u8; 20]) -> bool {
-        if let Some(integ) = self.attrs.message_integrity {
-            let comp = sha1_hmac(
-                password,
-                &[
-                    &self.integrity[..2],
-                    &[(self.integrity_len >> 8) as u8, self.integrity_len as u8],
-                    &self.integrity[4..],
-                ],
-            );
-
-            comp[..].ct_eq(integ).into()
-        } else {
-            false
-        }
+        // The covered bytes always include the 20-byte header; anything shorter (a message
+        // built by hand, or one whose integrity offset was lost) cannot verify.
+        let (Some(integ), Some(head), Some(tail)) = (
+            self.attrs.message_integrity,
+            self.integrity.get(..2),
+            self.integrity.get(4..),
+        ) else {
+            return false;
+        };
+        let comp = sha1_hmac(
+            password,
+            &[
+                head,
+                &[(self.integrity_len >> 8) as u8, self.integrity_len as u8],
+                tail,
+            ],
+        );
+        comp[..].ct_eq(integ).into()
     }
 
     /// Serialize this message into the provided buffer, returning the final length of the message.
@@ -891,7 +898,7 @@ impl<'a> Attributes<'a> {
     fn parse(
         mut buf: &'a [u8],
         trans_id: TransId,
-        msg_integrity_off: &mut usize,
+        msg_integrity_off: &mut Option<usize>,
     ) -> Result<Attributes<'a>, StunError> {
         let mut attributes = Attributes::default();
 
@@ -936,7 +943,7 @@ impl<'a> Attributes<'a> {
                         }
                         // message integrity is up until, but not including the message
                         // integrity attribute.
-                        *msg_integrity_off = off;
+                        *msg_integrity_off = Some(off);
                         ignore_rest = true;
                         attributes.message_integrity = Some(&buf[4..24]);
                     }
@@ -1584,6 +1591,45 @@ network_cost: (10, 10) \
         let result = StunMessage::parse(&[]);
 
         assert!(result.is_err());
+    }
+
+    /// With no other attributes, MESSAGE-INTEGRITY is the first one, at offset 0. Offset 0 used
+    /// to mean "absent": the covered bytes came out empty and `verify` panicked slicing them.
+    #[test]
+    fn integrity_as_the_first_attribute_verifies() {
+        let message = StunMessage {
+            method: Method::Binding,
+            class: Class::Indication,
+            trans_id: TransId::new(),
+            attrs: Attributes::default(),
+            integrity: &[],
+            integrity_len: 0,
+        };
+        let mut buf = [0u8; 1024];
+        let len = message
+            .to_bytes(Some(b"password"), &mut buf, sha1_hmac)
+            .unwrap();
+
+        let parsed = StunMessage::parse(&buf[..len]).unwrap();
+        assert!(parsed.attrs.message_integrity.is_some());
+        assert!(parsed.verify(b"password", sha1_hmac));
+        assert!(!parsed.verify(b"wrong", sha1_hmac));
+    }
+
+    #[test]
+    fn verify_without_the_covered_bytes_is_false() {
+        let message = StunMessage {
+            method: Method::Binding,
+            class: Class::Indication,
+            trans_id: TransId::new(),
+            attrs: Attributes {
+                message_integrity: Some(&[0; 20]),
+                ..Default::default()
+            },
+            integrity: &[0; 3],
+            integrity_len: 24,
+        };
+        assert!(!message.verify(b"password", sha1_hmac));
     }
 
     #[test]
