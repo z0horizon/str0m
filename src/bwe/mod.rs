@@ -91,6 +91,12 @@ impl Bwe {
         self.bwe.reset(init_bitrate);
     }
 
+    pub fn request_probe(&mut self, target: Bitrate, now: Instant) {
+        // The probe control learns the desired bitrate at the next timeout; a request made right
+        // after raising it must already be capped by the new value.
+        self.bwe.request_probe(target, self.desired_bitrate, now);
+    }
+
     pub fn update<'t>(
         &mut self,
         records: impl Iterator<Item = &'t crate::rtp_::TwccSendRecord>,
@@ -412,6 +418,11 @@ impl SendSideBandwidthEstimator {
     pub fn reset(&mut self, init_bitrate: Bitrate) {
         *self = Self::new(init_bitrate);
     }
+
+    pub fn request_probe(&mut self, target: Bitrate, desired: Bitrate, now: Instant) {
+        self.probe_control.set_desired_bitrate(desired);
+        self.probe_control.request_probe(target, now);
+    }
 }
 
 /// A RTP packet that has been sent and acknowledged by the receiver in a TWCC report.
@@ -490,5 +501,30 @@ impl fmt::Display for BandwidthUsage {
             BandwidthUsage::Normal => write!(f, "normal"),
             BandwidthUsage::Underuse => write!(f, "underuse"),
         }
+    }
+}
+
+#[cfg(test)]
+mod request_probe_test {
+    use super::*;
+
+    #[test]
+    fn a_request_right_after_raising_desired_is_capped_by_the_new_value() {
+        let now = Instant::now();
+        let mut bwe = SendSideBandwidthEstimator::new(Bitrate::kbps(700));
+        bwe.probe_control.enable(true);
+        bwe.probe_control.set_desired_bitrate(Bitrate::mbps(1));
+        bwe.probe_control
+            .set_estimated_bitrate(Bitrate::kbps(700), BandwidthLimitedCause::DelayBasedLimited);
+        while bwe.probe_control.handle_timeout(now).is_some() {}
+
+        // The old desired (1 Mbps) would cap this at 2 Mbps.
+        let later = now + Duration::from_secs(2);
+        bwe.request_probe(Bitrate::kbps(2_500), Bitrate::mbps(3), later);
+        let probe = bwe
+            .probe_control
+            .handle_timeout(later)
+            .expect("the requested probe");
+        assert_eq!(probe.target_bitrate(), Bitrate::kbps(2_500));
     }
 }

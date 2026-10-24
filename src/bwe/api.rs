@@ -61,6 +61,33 @@ impl<'a> Bwe<'a> {
         self.0.session.set_bwe_desired_bitrate(desired_bitrate);
     }
 
+    /// Ask for a probe cluster at `target` (capped at twice the desired bitrate).
+    ///
+    /// For an application that knows it is short of bandwidth for its next quality step and
+    /// does not want to wait for the built-in triggers (ALR every 5 s, or a stagnant estimate
+    /// after 15 s).
+    ///
+    /// **Note:** This only has an effect if BWE has been enabled via
+    /// [`RtcConfig::enable_bwe`][crate::RtcConfig::enable_bwe] and padding can be sent. The
+    /// request is dropped when a built-in probe would not run either, while another probe is
+    /// pending or awaits its result, and when the capped target is not above the estimate.
+    pub fn request_probe(&mut self, target: Bitrate) {
+        let now = self.0.last_now;
+        self.0.session.request_bwe_probe(target, now);
+    }
+
+    /// Let padding fill the total send rate up to `target` (capped by the current estimate).
+    ///
+    /// The default is about 50 kbps. Before stepping up to a higher layer, an application can
+    /// pad up to what it will send after the step. `None` returns to the default.
+    ///
+    /// **Note:** This only has an effect if BWE has been enabled via
+    /// [`RtcConfig::enable_bwe`][crate::RtcConfig::enable_bwe] and a negotiated sending media is
+    /// active. Padding still stops during overuse, and the target is kept across [`Bwe::reset`].
+    pub fn set_padding_target(&mut self, target: Option<Bitrate>) {
+        self.0.session.set_bwe_padding_target(target);
+    }
+
     /// Reset the BWE with a new init_bitrate
     ///
     /// This discards the current estimator state and starts estimation again

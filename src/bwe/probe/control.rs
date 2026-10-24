@@ -196,6 +196,33 @@ impl ProbeControl {
         self.request_immediate();
     }
 
+    /// Queue a probe the application asked for. See [`crate::bwe::Bwe::request_probe`].
+    pub fn request_probe(&mut self, target: Bitrate, now: Instant) {
+        if !self.enabled {
+            return;
+        }
+        let Some(desired) = self.desired_bitrate else {
+            return;
+        };
+        let Some(estimate) = self.last_estimate else {
+            return;
+        };
+        if !self.can_probe(estimate) || !self.pending.is_empty() {
+            return;
+        }
+        if let Some(last) = &self.last_probe {
+            let is_same = Some(estimate) == last.was_estimate;
+            if is_same && self.time_since_last_probe(now) < MAX_WAITING_TIME_FOR_PROBING_RESULT {
+                return;
+            }
+        }
+        if target.min(desired * MAX_PROBE_BITRATE_FACTOR) <= estimate {
+            return;
+        }
+        self.queue_probe(target, ProbeKind::Requested, desired, now);
+        self.request_immediate();
+    }
+
     fn request_immediate(&mut self) {
         self.next_timeout = already_happened();
         self.scheduled_exponential = None;
@@ -692,6 +719,150 @@ impl BandwidthLimitedCause {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn requested_probe_is_emitted_at_the_next_timeout() {
+        let mut pc = ProbeControl::new();
+        pc.enable(true);
+        let now = Instant::now();
+        pc.set_desired_bitrate(Bitrate::mbps(3));
+        pc.set_estimated_bitrate(Bitrate::kbps(700), BandwidthLimitedCause::DelayBasedLimited);
+        // Drain the initial probes.
+        while pc.handle_timeout(now).is_some() {}
+
+        let later = now + Duration::from_secs(4);
+        pc.request_probe(Bitrate::kbps(1200), later);
+        assert_eq!(pc.poll_timeout(), already_happened());
+        let p = pc.handle_timeout(later).expect("requested probe");
+        assert_eq!(p.target_bitrate(), Bitrate::kbps(1200));
+        assert!(!p.is_alr_probe());
+        assert!(pc.handle_timeout(later).is_none());
+    }
+
+    #[test]
+    fn requested_probe_is_capped_at_twice_desired() {
+        let mut pc = ProbeControl::new();
+        pc.enable(true);
+        let now = Instant::now();
+        pc.set_desired_bitrate(Bitrate::mbps(1));
+        pc.set_estimated_bitrate(Bitrate::kbps(500), BandwidthLimitedCause::DelayBasedLimited);
+        while pc.handle_timeout(now).is_some() {}
+        let later = now + Duration::from_secs(2);
+        pc.request_probe(Bitrate::mbps(5), later);
+        let p = pc.handle_timeout(later).expect("requested probe");
+        assert_eq!(p.target_bitrate(), Bitrate::mbps(2));
+    }
+
+    #[test]
+    fn requested_probe_is_dropped_while_disabled() {
+        let mut pc = ProbeControl::new();
+        let now = Instant::now();
+        pc.set_desired_bitrate(Bitrate::mbps(3));
+        pc.set_estimated_bitrate(Bitrate::kbps(500), BandwidthLimitedCause::DelayBasedLimited);
+        pc.request_probe(Bitrate::kbps(777), now);
+        pc.enable(true);
+        while let Some(p) = pc.handle_timeout(now) {
+            assert_ne!(
+                p.target_bitrate(),
+                Bitrate::kbps(777),
+                "a request made while disabled leaked"
+            );
+        }
+    }
+
+    #[test]
+    fn requested_probe_at_or_below_the_estimate_is_dropped() {
+        let mut pc = ProbeControl::new();
+        pc.enable(true);
+        let now = Instant::now();
+        pc.set_desired_bitrate(Bitrate::mbps(3));
+        pc.set_estimated_bitrate(Bitrate::mbps(1), BandwidthLimitedCause::DelayBasedLimited);
+        while pc.handle_timeout(now).is_some() {}
+
+        // A probe result replaces the estimate, so a probe below it could only lower it. An
+        // application reading a smoothed, lagging estimate asks for such probes.
+        let later = now + Duration::from_secs(2);
+        pc.request_probe(Bitrate::kbps(800), later);
+        assert!(
+            pc.handle_timeout(later).is_none(),
+            "probed below the estimate"
+        );
+        pc.request_probe(Bitrate::mbps(1), later);
+        assert!(pc.handle_timeout(later).is_none(), "probed at the estimate");
+
+        pc.request_probe(Bitrate::kbps(1_500), later);
+        let p = pc
+            .handle_timeout(later)
+            .expect("a probe above the estimate");
+        assert_eq!(p.target_bitrate(), Bitrate::kbps(1_500));
+    }
+
+    #[test]
+    fn requested_probe_is_dropped_where_built_in_probes_are() {
+        let mut pc = ProbeControl::new();
+        pc.enable(true);
+        let now = Instant::now();
+        pc.set_desired_bitrate(Bitrate::mbps(3));
+        pc.set_estimated_bitrate(Bitrate::kbps(700), BandwidthLimitedCause::DelayBasedLimited);
+        while pc.handle_timeout(now).is_some() {}
+
+        for cause in [
+            BandwidthLimitedCause::DelayBasedLimitedDelayIncreased,
+            BandwidthLimitedCause::LossLimitedBwe,
+        ] {
+            pc.set_estimated_bitrate(Bitrate::kbps(600), cause);
+            pc.request_probe(Bitrate::kbps(1200), now);
+            assert!(pc.handle_timeout(now).is_none(), "probed while {cause:?}");
+        }
+
+        pc.set_estimated_bitrate(
+            Bitrate::kbps(600),
+            BandwidthLimitedCause::LossLimitedBweIncreasing,
+        );
+        pc.request_probe(Bitrate::kbps(1200), now);
+        let p = pc
+            .handle_timeout(now)
+            .expect("a loss-limited estimate that increases may be probed");
+        assert_eq!(p.target_bitrate(), Bitrate::kbps(1200));
+    }
+
+    #[test]
+    fn repeated_requests_wait_for_the_result() {
+        let mut pc = ProbeControl::new();
+        pc.enable(true);
+        let now = Instant::now();
+        pc.set_desired_bitrate(Bitrate::mbps(3));
+        pc.set_estimated_bitrate(Bitrate::kbps(700), BandwidthLimitedCause::DelayBasedLimited);
+        while pc.handle_timeout(now).is_some() {}
+        let later = now + Duration::from_secs(10);
+
+        pc.request_probe(Bitrate::kbps(1400), later);
+        pc.request_probe(Bitrate::kbps(1400), later);
+        assert!(pc.handle_timeout(later).is_some());
+        assert!(
+            pc.handle_timeout(later).is_none(),
+            "one probe per request burst"
+        );
+
+        // Same estimate, no result yet: wait.
+        let soon = later + Duration::from_millis(500);
+        pc.request_probe(Bitrate::kbps(1400), soon);
+        assert!(
+            pc.handle_timeout(soon).is_none(),
+            "re-probed before the result"
+        );
+
+        // A result moved the estimate: probe again at once.
+        pc.set_estimated_bitrate(
+            Bitrate::kbps(1000),
+            BandwidthLimitedCause::DelayBasedLimited,
+        );
+        pc.request_probe(Bitrate::kbps(2000), soon);
+        let p = pc
+            .handle_timeout(soon)
+            .expect("probe from the new estimate");
+        assert_eq!(p.target_bitrate(), Bitrate::kbps(2000));
+    }
 
     #[test]
     fn initial_exponential_probes_are_queued_and_emitted_one_per_tick() {
