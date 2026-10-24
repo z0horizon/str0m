@@ -1268,6 +1268,9 @@ impl Session {
             .min();
         let paused_at = self.paused_at();
         let send_stream_at = self.streams.send_stream();
+        // A keyframe or REMB request goes out now, not with the next unrelated timer (up to the
+        // receiver-report interval when NACK is off).
+        let request_at = self.streams.pending_request();
 
         // Gives us built-in reason
         let bwe_at = self
@@ -1285,6 +1288,7 @@ impl Session {
             .soonest((packetize_at, Reason::Packetize))
             .soonest((paused_at, Reason::PauseCheck))
             .soonest((send_stream_at, Reason::SendStream))
+            .soonest((request_at, Reason::Feedback))
             .soonest(bwe_at)
     }
 

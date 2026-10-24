@@ -3,7 +3,7 @@
 use std::net::Ipv4Addr;
 
 use str0m::media::{Direction, KeyframeRequestKind, MediaKind};
-use str0m::{Event, RtcError};
+use str0m::{Event, Output, RtcError};
 
 mod common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, negotiate, progress};
@@ -204,5 +204,68 @@ fn keyframe_request_possibility_check() -> Result<(), RtcError> {
         );
     }
 
+    Ok(())
+}
+
+/// A keyframe request only marks itself pending; the RTCP goes out at the next timeout. That
+/// timeout must be now, not the next unrelated timer.
+#[test]
+fn keyframe_request_wakes_up_at_once() -> Result<(), RtcError> {
+    init_log();
+    init_crypto_default();
+
+    let mut l = TestRtc::new(Peer::Left);
+    let mut r = TestRtc::new(Peer::Right);
+
+    l.add_host_candidate((Ipv4Addr::new(1, 1, 1, 1), 1000).into());
+    r.add_host_candidate((Ipv4Addr::new(2, 2, 2, 2), 2000).into());
+
+    let mid = negotiate(&mut l, &mut r, |change| {
+        change.add_media(MediaKind::Video, Direction::SendRecv, None, None, None)
+    });
+
+    loop {
+        if l.is_connected() && r.is_connected() {
+            break;
+        }
+        progress(&mut l, &mut r)?;
+    }
+
+    let max = l.last.max(r.last);
+    l.last = max;
+    r.last = max;
+
+    let pt = l.params_vp8().pt();
+    for i in 0..20 {
+        let wallclock = l.start + l.duration();
+        let time = l.duration().into();
+        l.writer(mid)
+            .unwrap()
+            .write(pt, wallclock, time, vec![0x10, 0x00, 0x00, i as u8])?;
+        progress(&mut l, &mut r)?;
+    }
+
+    // Drain what R has to send now, so that only its next timer is left.
+    let idle_until = loop {
+        if let Output::Timeout(t) = r.rtc.poll_output()? {
+            break t;
+        }
+    };
+    assert!(idle_until > r.last, "R has nothing due before the request");
+
+    r.writer(mid)
+        .unwrap()
+        .request_keyframe(None, KeyframeRequestKind::Pli)?;
+
+    let wake_at = loop {
+        if let Output::Timeout(t) = r.rtc.poll_output()? {
+            break t;
+        }
+    };
+    assert!(
+        wake_at <= r.last,
+        "the request waits for an unrelated timer: {:?} after now",
+        wake_at - r.last
+    );
     Ok(())
 }

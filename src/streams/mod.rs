@@ -427,6 +427,14 @@ impl Streams {
         }
     }
 
+    /// Requests only mark themselves pending; `handle_timeout` sends them, so wake up at once.
+    pub(crate) fn pending_request(&self) -> Option<Instant> {
+        self.streams_rx
+            .values()
+            .any(|s| s.has_pending_request())
+            .then(already_happened)
+    }
+
     pub(crate) fn is_receiving(&self) -> bool {
         !self.streams_rx.is_empty()
     }

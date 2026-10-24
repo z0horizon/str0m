@@ -651,6 +651,11 @@ impl StreamRx {
         &data[n..]
     }
 
+    /// A keyframe or REMB request waits for the next `handle_timeout`.
+    pub(crate) fn has_pending_request(&self) -> bool {
+        self.pending_request_keyframe.is_some() || self.pending_request_remb.is_some()
+    }
+
     pub(crate) fn maybe_create_keyframe_request(
         &mut self,
         sender_ssrc: Ssrc,
