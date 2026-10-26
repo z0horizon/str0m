@@ -833,12 +833,7 @@ mod test {
             // decays to 400 kbps from keep-alive padding.
             for ms in (200..=4000).step_by(100) {
                 rate_controller.set_in_alr(true, now + duration_ms(ms));
-                rate_controller.update(
-                    Signal::Normal,
-                    400_000.into(),
-                    None,
-                    now + duration_ms(ms),
-                );
+                rate_controller.update(Signal::Normal, 400_000.into(), None, now + duration_ms(ms));
             }
 
             // User scrolls at t = 4050ms, exiting ALR and triggering a brief self-induced Overuse
@@ -875,12 +870,7 @@ mod test {
             // only a re-minted bound could still hold it.
             for ms in [1200, 2000, 3000] {
                 rate_controller.set_in_alr(true, now + duration_ms(ms));
-                rate_controller.update(
-                    Signal::Normal,
-                    600_000.into(),
-                    None,
-                    now + duration_ms(ms),
-                );
+                rate_controller.update(Signal::Normal, 600_000.into(), None, now + duration_ms(ms));
             }
             rate_controller.set_in_alr(true, now + duration_ms(3200));
             rate_controller.update(

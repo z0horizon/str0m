@@ -100,7 +100,9 @@ impl AckedBitrateEstimator {
         // keep-alive padding or a residual 1-packet pre-ALR tail window closing as the first
         // post-ALR packet arrives) reflect the idle application rate rather than link capacity.
         // Do not let them decay the prior estimate or consume the fast-rate-change `estimate_var`.
-        if (self.in_alr || self.estimate_var > 50.0) && is_small_sample && sample_estimate < estimate
+        if (self.in_alr || self.estimate_var > 50.0)
+            && is_small_sample
+            && sample_estimate < estimate
         {
             return;
         }

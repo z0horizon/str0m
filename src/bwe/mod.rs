@@ -606,15 +606,30 @@ mod estimate_report_test {
     fn reports_every_change_without_averaging() {
         let mut last = None;
         assert_eq!(report_if_changed(&mut last, None), None);
-        assert_eq!(report_if_changed(&mut last, Some(Bitrate::kbps(2_000))), Some(Bitrate::kbps(2_000)));
+        assert_eq!(
+            report_if_changed(&mut last, Some(Bitrate::kbps(2_000))),
+            Some(Bitrate::kbps(2_000))
+        );
         // Unchanged: nothing to report.
-        assert_eq!(report_if_changed(&mut last, Some(Bitrate::kbps(2_000))), None);
+        assert_eq!(
+            report_if_changed(&mut last, Some(Bitrate::kbps(2_000))),
+            None
+        );
         // A collapse is reported as is, not averaged with the previous value.
-        assert_eq!(report_if_changed(&mut last, Some(Bitrate::kbps(500))), Some(Bitrate::kbps(500)));
+        assert_eq!(
+            report_if_changed(&mut last, Some(Bitrate::kbps(500))),
+            Some(Bitrate::kbps(500))
+        );
         // So is a rise.
-        assert_eq!(report_if_changed(&mut last, Some(Bitrate::kbps(800))), Some(Bitrate::kbps(800)));
+        assert_eq!(
+            report_if_changed(&mut last, Some(Bitrate::kbps(800))),
+            Some(Bitrate::kbps(800))
+        );
         // A small change is still a change.
-        assert_eq!(report_if_changed(&mut last, Some(Bitrate::kbps(810))), Some(Bitrate::kbps(810)));
+        assert_eq!(
+            report_if_changed(&mut last, Some(Bitrate::kbps(810))),
+            Some(Bitrate::kbps(810))
+        );
         // No estimate keeps the last reported value.
         assert_eq!(report_if_changed(&mut last, None), None);
         assert_eq!(last, Some(Bitrate::kbps(810)));

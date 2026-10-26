@@ -1763,18 +1763,31 @@ mod test {
     fn essential_resend_goes_first_and_past_the_ordinary_budget() {
         use crate::streams::RetransmissionLimiter;
         let now = Instant::now();
-        let mut stream =
-            StreamTx::new(42.into(), Some(44.into()), MidRid(Mid::from("0"), None), false, 1200);
+        let mut stream = StreamTx::new(
+            42.into(),
+            Some(44.into()),
+            MidRid(Mid::from("0"), None),
+            false,
+            1200,
+        );
         for seq in 1..=4 {
-            stream.rtx_cache.cache_sent_packet(cached_packet(seq, now), now);
+            stream
+                .rtx_cache
+                .cache_sent_packet(cached_packet(seq, now), now);
         }
-        stream.rtx_cache.cache_sent_packet(essential_packet(5, now), now);
+        stream
+            .rtx_cache
+            .cache_sent_packet(essential_packet(5, now), now);
         let mut limiter = RetransmissionLimiter::new();
         // 0.5 x 3_200 bps over 500 ms = 100 bytes: one ordinary 100-byte packet; essential packets
         // get 200 bytes in all.
         limiter.set_max_rate(Some(Bitrate::bps(3_200)));
         // NACK 3 (ordinary), then 4 (ordinary, over budget), then 5 (essential).
-        stream.handle_nack([NackEntry { pid: 3, blp: 0b11 }].into_iter(), now, Some(&mut limiter));
+        stream.handle_nack(
+            [NackEntry { pid: 3, blp: 0b11 }].into_iter(),
+            now,
+            Some(&mut limiter),
+        );
         let order: Vec<u64> = stream.resends.iter().map(|r| *r.seq_no).collect();
         assert_eq!(order, vec![5, 3]);
     }
@@ -1782,10 +1795,17 @@ mod test {
     #[test]
     fn discard_resends_drops_queued_and_cached() {
         let now = Instant::now();
-        let mut stream =
-            StreamTx::new(42.into(), Some(44.into()), MidRid(Mid::from("0"), None), false, 1200);
+        let mut stream = StreamTx::new(
+            42.into(),
+            Some(44.into()),
+            MidRid(Mid::from("0"), None),
+            false,
+            1200,
+        );
         for seq in 1..=10 {
-            stream.rtx_cache.cache_sent_packet(cached_packet(seq, now), now);
+            stream
+                .rtx_cache
+                .cache_sent_packet(cached_packet(seq, now), now);
         }
         stream.handle_nack([NackEntry { pid: 3, blp: 0b10 }].into_iter(), now, None);
         assert_eq!(stream.resends.len(), 2);
@@ -1829,14 +1849,23 @@ mod test {
     #[test]
     fn packets_after_discard_are_repaired() {
         let now = Instant::now();
-        let mut stream =
-            StreamTx::new(42.into(), Some(44.into()), MidRid(Mid::from("0"), None), false, 1200);
+        let mut stream = StreamTx::new(
+            42.into(),
+            Some(44.into()),
+            MidRid(Mid::from("0"), None),
+            false,
+            1200,
+        );
         for seq in 1..=10 {
-            stream.rtx_cache.cache_sent_packet(cached_packet(seq, now), now);
+            stream
+                .rtx_cache
+                .cache_sent_packet(cached_packet(seq, now), now);
         }
         stream.discard_resends();
         for seq in 11..=12 {
-            stream.rtx_cache.cache_sent_packet(cached_packet(seq, now), now);
+            stream
+                .rtx_cache
+                .cache_sent_packet(cached_packet(seq, now), now);
         }
         stream.handle_nack([NackEntry { pid: 11, blp: 0 }].into_iter(), now, None);
         let next = stream.poll_packet_resend(now).expect("resend of 11");
@@ -1847,73 +1876,151 @@ mod test {
     fn nack_beyond_the_retransmission_budget_is_not_queued() {
         use crate::streams::RetransmissionLimiter;
         let now = Instant::now();
-        let mut stream =
-            StreamTx::new(42.into(), Some(44.into()), MidRid(Mid::from("0"), None), false, 1200);
+        let mut stream = StreamTx::new(
+            42.into(),
+            Some(44.into()),
+            MidRid(Mid::from("0"), None),
+            false,
+            1200,
+        );
         for seq in 1..=10 {
-            stream.rtx_cache.cache_sent_packet(cached_packet(seq, now), now);
+            stream
+                .rtx_cache
+                .cache_sent_packet(cached_packet(seq, now), now);
         }
         let mut limiter = RetransmissionLimiter::new();
         // 0.5 x 6_400 bps over 500 ms = 200 bytes: two 100-byte packets.
         limiter.set_max_rate(Some(Bitrate::bps(6_400)));
         // NACK 3, 5 and 7.
-        stream.handle_nack([NackEntry { pid: 3, blp: 0b1010 }].into_iter(), now, Some(&mut limiter));
+        stream.handle_nack(
+            [NackEntry {
+                pid: 3,
+                blp: 0b1010,
+            }]
+            .into_iter(),
+            now,
+            Some(&mut limiter),
+        );
         assert_eq!(stream.resends.len(), 2);
     }
 
     #[test]
     fn nack_for_a_queued_packet_is_ignored() {
         let now = Instant::now();
-        let mut stream =
-            StreamTx::new(42.into(), Some(44.into()), MidRid(Mid::from("0"), None), false, 1200);
+        let mut stream = StreamTx::new(
+            42.into(),
+            Some(44.into()),
+            MidRid(Mid::from("0"), None),
+            false,
+            1200,
+        );
         for seq in 1..=10 {
-            stream.rtx_cache.cache_sent_packet(cached_packet(seq, now), now);
+            stream
+                .rtx_cache
+                .cache_sent_packet(cached_packet(seq, now), now);
         }
         stream.handle_nack([NackEntry { pid: 3, blp: 0 }].into_iter(), now, None);
-        stream.handle_nack([NackEntry { pid: 3, blp: 0 }].into_iter(), now + Duration::from_millis(10), None);
+        stream.handle_nack(
+            [NackEntry { pid: 3, blp: 0 }].into_iter(),
+            now + Duration::from_millis(10),
+            None,
+        );
         assert_eq!(stream.resends.len(), 1);
     }
 
     #[test]
     fn nack_within_rtt_of_a_resend_is_ignored() {
         let now = Instant::now();
-        let mut stream =
-            StreamTx::new(42.into(), Some(44.into()), MidRid(Mid::from("0"), None), false, 1200);
+        let mut stream = StreamTx::new(
+            42.into(),
+            Some(44.into()),
+            MidRid(Mid::from("0"), None),
+            false,
+            1200,
+        );
         for seq in 1..=10 {
-            stream.rtx_cache.cache_sent_packet(cached_packet(seq, now), now);
+            stream
+                .rtx_cache
+                .cache_sent_packet(cached_packet(seq, now), now);
         }
         stream.stats.set_rtt(Some(Duration::from_millis(50)));
         stream.handle_nack([NackEntry { pid: 3, blp: 0 }].into_iter(), now, None);
         assert!(stream.poll_packet_resend(now).is_some());
         // RTT 50 ms: the gate is 55 ms.
-        stream.handle_nack([NackEntry { pid: 3, blp: 0 }].into_iter(), now + Duration::from_millis(50), None);
-        assert!(stream.resends.is_empty(), "resent 50 ms ago, inside the 55 ms gate");
-        stream.handle_nack([NackEntry { pid: 3, blp: 0 }].into_iter(), now + Duration::from_millis(56), None);
-        assert_eq!(stream.resends.len(), 1, "past the gate the packet is resent again");
+        stream.handle_nack(
+            [NackEntry { pid: 3, blp: 0 }].into_iter(),
+            now + Duration::from_millis(50),
+            None,
+        );
+        assert!(
+            stream.resends.is_empty(),
+            "resent 50 ms ago, inside the 55 ms gate"
+        );
+        stream.handle_nack(
+            [NackEntry { pid: 3, blp: 0 }].into_iter(),
+            now + Duration::from_millis(56),
+            None,
+        );
+        assert_eq!(
+            stream.resends.len(),
+            1,
+            "past the gate the packet is resent again"
+        );
     }
 
     #[test]
     fn no_time_gate_before_rtt_is_known() {
         let now = Instant::now();
-        let mut stream =
-            StreamTx::new(42.into(), Some(44.into()), MidRid(Mid::from("0"), None), false, 1200);
+        let mut stream = StreamTx::new(
+            42.into(),
+            Some(44.into()),
+            MidRid(Mid::from("0"), None),
+            false,
+            1200,
+        );
         for seq in 1..=10 {
-            stream.rtx_cache.cache_sent_packet(cached_packet(seq, now), now);
+            stream
+                .rtx_cache
+                .cache_sent_packet(cached_packet(seq, now), now);
         }
         stream.handle_nack([NackEntry { pid: 3, blp: 0 }].into_iter(), now, None);
         assert!(stream.poll_packet_resend(now).is_some());
-        stream.handle_nack([NackEntry { pid: 3, blp: 0 }].into_iter(), now + Duration::from_millis(10), None);
-        assert_eq!(stream.resends.len(), 1, "like libwebrtc's packet history, no RTT means no gate");
+        stream.handle_nack(
+            [NackEntry { pid: 3, blp: 0 }].into_iter(),
+            now + Duration::from_millis(10),
+            None,
+        );
+        assert_eq!(
+            stream.resends.len(),
+            1,
+            "like libwebrtc's packet history, no RTT means no gate"
+        );
     }
 
     #[test]
     fn nack_without_a_limiter_queues_every_cached_packet() {
         let now = Instant::now();
-        let mut stream =
-            StreamTx::new(42.into(), Some(44.into()), MidRid(Mid::from("0"), None), false, 1200);
+        let mut stream = StreamTx::new(
+            42.into(),
+            Some(44.into()),
+            MidRid(Mid::from("0"), None),
+            false,
+            1200,
+        );
         for seq in 1..=10 {
-            stream.rtx_cache.cache_sent_packet(cached_packet(seq, now), now);
+            stream
+                .rtx_cache
+                .cache_sent_packet(cached_packet(seq, now), now);
         }
-        stream.handle_nack([NackEntry { pid: 3, blp: 0b1010 }].into_iter(), now, None);
+        stream.handle_nack(
+            [NackEntry {
+                pid: 3,
+                blp: 0b1010,
+            }]
+            .into_iter(),
+            now,
+            None,
+        );
         assert_eq!(stream.resends.len(), 3);
     }
 

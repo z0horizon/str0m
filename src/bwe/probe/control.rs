@@ -565,9 +565,7 @@ impl ProbeControl {
 
         // A probe below the current estimate would pace outgoing packets below the already
         // estimated capacity (except LargeDrop, which intentionally probes below pre-drop).
-        if kind != ProbeKind::LargeDrop
-            && self.last_estimate.is_some_and(|est| bitrate <= est)
-        {
+        if kind != ProbeKind::LargeDrop && self.last_estimate.is_some_and(|est| bitrate <= est) {
             return;
         }
 
