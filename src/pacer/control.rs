@@ -82,17 +82,14 @@ mod test {
             c.calculate(true, Bitrate::kbps(2_200), false).padding_rate,
             Bitrate::kbps(1_800)
         );
-        // Never above the estimate.
         assert_eq!(
             c.calculate(true, Bitrate::kbps(1_000), false).padding_rate,
             Bitrate::kbps(1_000)
         );
-        // Overuse still stops padding.
         assert_eq!(
             c.calculate(true, Bitrate::kbps(2_200), true).padding_rate,
             Bitrate::ZERO
         );
-        // Cleared: back to the keep-alive rate.
         c.set_padding_target(None);
         assert_eq!(
             c.calculate(true, Bitrate::kbps(2_200), false).padding_rate,

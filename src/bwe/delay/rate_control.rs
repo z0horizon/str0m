@@ -202,18 +202,12 @@ impl RateControl {
         // (update_estimate handles clamping to min/max bounds).
         self.update_estimate(probe_bitrate, now);
         self.last_probe = Some((probe_bitrate, now));
-
-        // Do NOT change self.state - keep current state to avoid triggering unintended AIMD behavior.
     }
 
     /// Updates ALR state on the rate controller.
     ///
-    /// While the sender is in ALR (e.g. a static screen share), the application is voluntarily
-    /// sending far below `estimated_bitrate`, so `observed_bitrate` reflects the idle rate rather
-    /// than link capacity. Keeping the proven estimate floor fresh across the ALR window ensures
-    /// that when the application resumes sending in a step (exiting ALR), the brief self-induced
-    /// trendline overuse before the first 150 ms acked-bitrate window fills is bounded by the
-    /// proven capacity rather than slashing the estimate to 0.85x of the idle rate.
+    /// In ALR the observed rate is the idle application rate, not link capacity, so the proven
+    /// floor is kept fresh to bound the overuse that the step out of ALR causes.
     pub fn set_in_alr(&mut self, in_alr: bool, now: Instant) {
         if in_alr {
             if !self.in_alr && self.last_probe.is_none() && self.episode_floor.is_none() {
@@ -636,8 +630,7 @@ mod test {
 
         /// The queue a keyframe builds after the step can read as several short overuse
         /// episodes, while the acknowledged rate still lags the step. Every such episode within
-        /// the probe's window is bounded (seen in a browser: a second episode 0.75 s after the
-        /// probe cut 2.3 Mbps to 0.85x a stale 305 kbps).
+        /// the probe's window is bounded.
         #[test]
         fn a_later_short_episode_within_the_window_is_still_bounded() {
             let now = Instant::now();

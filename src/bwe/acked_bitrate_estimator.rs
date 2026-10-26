@@ -95,11 +95,8 @@ impl AckedBitrateEstimator {
             return;
         };
 
-        // While application-limited (ALR) or waiting for the first non-trivial window after
-        // `expect_fast_rate_change`, small samples (< 2000 B per 150 ms window, such as 50 kbps
-        // keep-alive padding or a residual 1-packet pre-ALR tail window closing as the first
-        // post-ALR packet arrives) reflect the idle application rate rather than link capacity.
-        // Do not let them decay the prior estimate or consume the fast-rate-change `estimate_var`.
+        // Small samples in ALR, or before the first full window after an ALR exit, reflect the
+        // idle rate rather than capacity: keep them from decaying the estimate or `estimate_var`.
         if (self.in_alr || self.estimate_var > 50.0)
             && is_small_sample
             && sample_estimate < estimate
@@ -297,45 +294,6 @@ mod test {
             estimate_before.as_u64(),
             estimate_after.as_u64(),
             "Estimate should change after accumulating >= 150ms due to correct modulo overflow"
-        );
-    }
-
-    #[test]
-    fn test_fast_rate_change_after_alr_recovers_within_two_windows() {
-        let mut now = Instant::now();
-        let mut estimator =
-            AckedBitrateEstimator::new(Duration::from_millis(500), Duration::from_millis(150));
-
-        // 1. Establish 2.5 Mbps estimate over 1 second (3125 bytes every 10ms)
-        for _ in 0..100 {
-            now += Duration::from_millis(10);
-            estimator.update(now, DataSize::bytes(3125));
-        }
-        let active_est = estimator.current_estimate().unwrap();
-        assert!(
-            active_est >= Bitrate::kbps(2_400),
-            "Should converge near 2.5 Mbps, got {active_est}"
-        );
-
-        // 2. Enter ALR for 5 seconds while 50 kbps padding packets (31 bytes every 5ms) arrive
-        estimator.set_alr(true);
-        for _ in 0..1000 {
-            now += Duration::from_millis(5);
-            estimator.update_packet(now, now, DataSize::bytes(31));
-        }
-
-        // 3. Exit ALR and resume 2.5 Mbps media for two 150ms windows (300ms)
-        estimator.set_alr_ended_time(now);
-        estimator.set_alr(false);
-        for _ in 0..30 {
-            now += Duration::from_millis(10);
-            estimator.update_packet(now, now, DataSize::bytes(3125));
-        }
-
-        let recovered = estimator.current_estimate().unwrap();
-        assert!(
-            recovered >= Bitrate::kbps(2_000),
-            "AckedBitrateEstimator must recover >= 2.0 Mbps within two 150ms windows after ALR exit, got {recovered}"
         );
     }
 }

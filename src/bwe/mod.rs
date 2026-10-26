@@ -357,8 +357,6 @@ impl SendSideBandwidthEstimator {
             self.alr_detector.handle_timeout(now);
         }
 
-        // Get ALR state and forward to probe control, loss controller, acked bitrate
-        // estimator, and delay controller.
         let alr_start_time = self.alr_detector.alr_start_time();
         let in_alr = alr_start_time.is_some();
         if self.was_in_alr && !in_alr {
@@ -610,7 +608,6 @@ mod estimate_report_test {
             report_if_changed(&mut last, Some(Bitrate::kbps(2_000))),
             Some(Bitrate::kbps(2_000))
         );
-        // Unchanged: nothing to report.
         assert_eq!(
             report_if_changed(&mut last, Some(Bitrate::kbps(2_000))),
             None
@@ -620,17 +617,14 @@ mod estimate_report_test {
             report_if_changed(&mut last, Some(Bitrate::kbps(500))),
             Some(Bitrate::kbps(500))
         );
-        // So is a rise.
         assert_eq!(
             report_if_changed(&mut last, Some(Bitrate::kbps(800))),
             Some(Bitrate::kbps(800))
         );
-        // A small change is still a change.
         assert_eq!(
             report_if_changed(&mut last, Some(Bitrate::kbps(810))),
             Some(Bitrate::kbps(810))
         );
-        // No estimate keeps the last reported value.
         assert_eq!(report_if_changed(&mut last, None), None);
         assert_eq!(last, Some(Bitrate::kbps(810)));
     }

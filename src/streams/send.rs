@@ -1061,11 +1061,9 @@ impl StreamTx {
         // Schedule all resends. They will be handled on next poll_packet
         for seq_no in iter {
             if self.resends.iter().any(|r| r.seq_no == seq_no) {
-                // Already queued.
                 continue;
             }
-            // Like libwebrtc's RtpPacketHistory, which starts with no RTT: no time gate until a
-            // receiver report gives one.
+            // No RTT before the first receiver report, so no time gate.
             let gate = self.stats.rtt().map(|rtt| rtt + RESEND_RTT_MARGIN);
             if gate.is_some_and(|gate| {
                 self.resent_at

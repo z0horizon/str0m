@@ -2251,7 +2251,7 @@ mod test {
     #[test]
     fn event_is_reasonably_sized() {
         let n = std::mem::size_of::<Event>();
-        assert!(n < 536); // Increased to accommodate user_inline in ExtensionValues and payload_patch
+        assert!(n < 536);
     }
 }
 
