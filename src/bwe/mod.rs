@@ -236,17 +236,16 @@ impl SendSideBandwidthEstimator {
 
         // Feed records to probe estimator for analysis and process any new probe results
         let mut latest_probe_result = None;
-        for (config, bitrate) in self.probe_estimator.update(send_records.iter().copied()) {
+        for (_, bitrate) in self.probe_estimator.update(send_records.iter().copied()) {
             latest_probe_result = Some(bitrate);
             self.probe_applied = true;
 
-            // Update link capacity estimator for every successful ALR probe, not just the latest.
-            // The estimator internally takes the max of all probe results, building up knowledge
-            // of proven link capacity. This differs from the delay controller, which only receives
-            // the latest probe result (matching WebRTC's FetchAndResetLastEstimatedBitrate behavior).
-            if config.is_alr_probe() {
-                self.link_capacity_estimator.update_from_probe(bitrate, now);
-            }
+            // Every successful probe proves capacity, not just the latest, and not just ALR ones:
+            // the capacity bounds the estimate in ALR, so a low ALR probe that only ALR probes
+            // could raise would pin the estimate until it expires. The estimator keeps the max.
+            // The delay controller only receives the latest probe result (matching WebRTC's
+            // FetchAndResetLastEstimatedBitrate behavior).
+            self.link_capacity_estimator.update_from_probe(bitrate, now);
         }
 
         let mut acked_packets = vec![];
@@ -654,5 +653,43 @@ mod request_probe_test {
             .handle_timeout(later)
             .expect("the requested probe");
         assert_eq!(probe.target_bitrate(), Bitrate::kbps(2_500));
+    }
+}
+
+#[cfg(test)]
+mod link_capacity_test {
+    use super::*;
+    use crate::rtp_::TwccPacketId;
+    use probe::{ProbeClusterConfig, ProbeKind};
+
+    // A requested probe that proves more capacity must lift the capacity that bounds the
+    // estimate in ALR; otherwise a low ALR probe pins the estimate until it expires.
+    #[test]
+    fn a_requested_probe_raises_the_link_capacity() {
+        let base = Instant::now();
+        let mut bwe = SendSideBandwidthEstimator::new(Bitrate::kbps(500));
+        let cluster: TwccClusterId = 3.into();
+        let config = ProbeClusterConfig::new(cluster, Bitrate::mbps(2), ProbeKind::Requested);
+        bwe.probe_estimator.probe_start(config, base);
+
+        let records: Vec<_> = (0..5)
+            .map(|i| {
+                let pid = TwccPacketId::with_cluster(TwccSeq::from(1000 + i), cluster);
+                TwccSendRecord::test_new(
+                    pid,
+                    base + Duration::from_millis(i * 4),
+                    1200,
+                    base + Duration::from_millis(i * 4 + 1),
+                    Some(base + Duration::from_millis(i * 4 + 2)),
+                )
+            })
+            .collect();
+        bwe.update(records.iter(), base + Duration::from_millis(50));
+
+        assert!(
+            bwe.link_capacity_estimator
+                .capacity_estimate(base + Duration::from_millis(50))
+                .is_some()
+        );
     }
 }

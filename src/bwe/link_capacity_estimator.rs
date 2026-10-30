@@ -35,7 +35,6 @@ impl LinkCapacityEstimator {
 
     /// Update the capacity estimate from a successful probe result.
     ///
-    /// This should only be called for probes that were sent during ALR.
     /// The estimate is stored along with the current time for decay tracking.
     pub fn update_from_probe(&mut self, probe_estimate: Bitrate, now: Instant) {
         // Only accept valid probe estimates
