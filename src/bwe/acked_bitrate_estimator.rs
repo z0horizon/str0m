@@ -25,6 +25,8 @@ pub struct AckedBitrateEstimator {
     last_update: Option<Instant>,
     /// Whether the sender is currently in an Application-Limited Region (ALR).
     in_alr: bool,
+    /// Whether the delay detector signals overuse, which makes a low sample capacity, not idle.
+    overusing: bool,
     /// Timestamp when the most recent ALR period ended, used to trigger a fast rate change
     /// on the first acknowledged packet sent after leaving ALR (matching libwebrtc's
     /// `AcknowledgedBitrateEstimator::SetAlrEndedTime`).
@@ -42,12 +44,17 @@ impl AckedBitrateEstimator {
             current_window: Duration::ZERO,
             last_update: None,
             in_alr: false,
+            overusing: false,
             alr_ended_time: None,
         }
     }
 
     pub(super) fn set_alr(&mut self, in_alr: bool) {
         self.in_alr = in_alr;
+    }
+
+    pub(super) fn set_overusing(&mut self, overusing: bool) {
+        self.overusing = overusing;
     }
 
     pub(super) fn set_alr_ended_time(&mut self, at: Instant) {
@@ -95,12 +102,13 @@ impl AckedBitrateEstimator {
             return;
         };
 
-        // Small samples in ALR, or before the first full window after an ALR exit, reflect the
-        // idle rate rather than capacity: keep them from decaying the estimate or `estimate_var`.
-        if (self.in_alr || self.estimate_var > 50.0)
-            && is_small_sample
-            && sample_estimate < estimate
-        {
+        // Samples in ALR without overuse, and small samples before the first full window after
+        // an ALR exit, reflect the idle rate rather than capacity: keep them from decaying the
+        // estimate or `estimate_var`. Size alone does not tell idle from capacity: audio alone
+        // can fill the small-sample threshold.
+        let idle = (self.in_alr && !self.overusing)
+            || ((self.in_alr || self.estimate_var > 50.0) && is_small_sample);
+        if idle && sample_estimate < estimate {
             return;
         }
 
@@ -212,6 +220,35 @@ mod test {
             39056,
             "AckedBitrateEstiamtor should produce the correct bitrate"
         );
+    }
+
+    /// 10 s at 3.6 Mbps, then 35 s of 160 kbps audio (above the small-sample threshold) in ALR.
+    fn after_idle_audio(overusing: bool) -> u64 {
+        let now = Instant::now();
+        let mut estimator =
+            AckedBitrateEstimator::new(Duration::from_millis(500), Duration::from_millis(150));
+        let mut t = now;
+        while t < now + Duration::from_secs(10) {
+            estimator.update_packet(t, t, DataSize::bytes(1200));
+            t += Duration::from_micros(2667);
+        }
+        estimator.set_alr(true);
+        estimator.set_overusing(overusing);
+        while t < now + Duration::from_secs(45) {
+            estimator.update_packet(t, t, DataSize::bytes(400));
+            t += Duration::from_millis(20);
+        }
+        estimator.current_estimate().unwrap().as_u64()
+    }
+
+    #[test]
+    fn idle_audio_in_alr_keeps_the_estimate() {
+        assert!(after_idle_audio(false) > 3_000_000);
+    }
+
+    #[test]
+    fn low_samples_in_alr_with_overuse_lower_the_estimate() {
+        assert!(after_idle_audio(true) < 200_000);
     }
 
     #[test]

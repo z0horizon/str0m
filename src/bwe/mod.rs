@@ -265,6 +265,8 @@ impl SendSideBandwidthEstimator {
         }
         acked_packets.sort_by(AckedPacket::order_by_receive_time);
 
+        self.acked_bitrate_estimator
+            .set_overusing(self.delay_controller.is_overusing());
         for acked_packet in acked_packets.iter() {
             self.acked_bitrate_estimator.update_packet(
                 acked_packet.local_send_time,
