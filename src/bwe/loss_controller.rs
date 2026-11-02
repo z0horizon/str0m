@@ -722,7 +722,7 @@ impl LossController {
             return upper_bound;
         }
 
-        if self.config.rampup_acceleration_max_factor > Duration::ZERO
+        if self.config.rampup_acceleration_max_factor > 0.0
             && self.last_send_time_most_recent_observation.is_exact()
             && self.last_time_estimate_reduced.is_exact()
         {
@@ -735,7 +735,7 @@ impl LossController {
                 .as_secs_f64()
                 .min(delta.as_secs_f64());
 
-            let rampup_acceleration = self.config.rampup_acceleration_max_factor.as_secs_f64()
+            let rampup_acceleration = self.config.rampup_acceleration_max_factor
                 * time_since_bw_reduced
                 / self.config.rampup_acceleration_maxout_time.as_secs_f64();
 
@@ -887,7 +887,7 @@ struct Config {
     append_delay_based_estimate_candidate: bool,
     bandwidth_backoff_lower_bound_factor: f64,
     rampup_acceleration_maxout_time: Duration,
-    rampup_acceleration_max_factor: Duration,
+    rampup_acceleration_max_factor: f64,
     higher_bandwidth_bias_factor: f64,
     higher_log_bandwidth_bias_factor: f64,
     threshold_of_high_bandwidth_preference: f64,
@@ -1076,7 +1076,7 @@ impl Default for Config {
             append_delay_based_estimate_candidate: true,
             bandwidth_backoff_lower_bound_factor: 1.0,
             rampup_acceleration_maxout_time: Duration::from_secs(60),
-            rampup_acceleration_max_factor: Duration::from_secs(60),
+            rampup_acceleration_max_factor: 0.0,
             higher_bandwidth_bias_factor: 0.0002,
             higher_log_bandwidth_bias_factor: 0.02,
             threshold_of_high_bandwidth_preference: 0.2,
@@ -1129,6 +1129,25 @@ mod test {
         fn lost(&self) -> bool {
             self.lost
         }
+    }
+
+    #[test]
+    fn rampup_acceleration_is_off_by_default() {
+        use super::Timestamp;
+
+        let mut lbc = LossController::new();
+        lbc.set_acknowledged_bitrate(Bitrate::kbps(1_000));
+        lbc.delay_based_estimate = Bitrate::kbps(2_000);
+        let reduced_at = Instant::now();
+        lbc.last_time_estimate_reduced = Timestamp::Exact(reduced_at);
+
+        lbc.last_send_time_most_recent_observation = Timestamp::Exact(reduced_at);
+        let right_after = lbc.get_candidate_bandwidth_upper_bound();
+        lbc.last_send_time_most_recent_observation =
+            Timestamp::Exact(reduced_at + Duration::from_secs(30));
+        let thirty_s_later = lbc.get_candidate_bandwidth_upper_bound();
+
+        assert_eq!(right_after, thirty_s_later);
     }
 
     #[test]
