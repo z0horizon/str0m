@@ -72,6 +72,7 @@ pub struct ProbeControl {
     last_probe: Option<LastProbe>,
 
     large_drop: Option<LargeDrop>,
+    last_drop_probe: Option<Instant>,
 
     last_stagnant: Option<Instant>,
 
@@ -113,6 +114,7 @@ impl Default for ProbeControl {
             next_cluster_id: 0.into(),
             last_probe: None,
             large_drop: None,
+            last_drop_probe: None,
             last_stagnant: None,
             pending: VecDeque::new(),
             scheduled_exponential: None,
@@ -139,6 +141,7 @@ impl ProbeControl {
             self.last_estimate_change = None;
             self.last_stagnant = None;
             self.last_probe = None;
+            self.last_drop_probe = None;
             self.prev_estimate = None;
             self.scheduled_exponential = None;
             self.scheduled_periodic_alr = None;
@@ -540,14 +543,19 @@ impl ProbeControl {
             return false;
         }
 
-        // Respect minimum interval between ALR probes.
-        if self.time_since_last_probe(now) < MIN_TIME_BETWEEN_ALR_PROBES {
+        // Spaced from the last drop probe only, as libwebrtc: probes of other kinds would
+        // otherwise hold it back until the ALR context has expired.
+        if self
+            .last_drop_probe
+            .is_some_and(|t| now.saturating_duration_since(t) < MIN_TIME_BETWEEN_ALR_PROBES)
+        {
             return false;
         }
 
         // Probe at 85% of pre-drop bitrate.
         let target = drop.bitrate_before * PROBE_FRACTION_AFTER_DROP;
         self.queue_probe(target, ProbeKind::LargeDrop, desired, now);
+        self.last_drop_probe = Some(now);
 
         self.large_drop = None;
         true
@@ -1071,6 +1079,61 @@ mod test {
             assert!(probe.target_bitrate() >= Bitrate::mbps(4));
             assert!(probe.target_bitrate() <= Bitrate::mbps(5));
         }
+    }
+
+    #[test]
+    fn large_drop_probing_is_not_held_back_by_another_kind_of_probe() {
+        let mut pc = ProbeControl::new();
+        pc.enable(true);
+        let now = Instant::now();
+        pc.set_desired_bitrate(Bitrate::mbps(5));
+        pc.set_estimated_bitrate(Bitrate::mbps(5), BandwidthLimitedCause::DelayBasedLimited);
+        while pc.handle_timeout(now).is_some() {}
+        assert!(pc.handle_timeout(now + Duration::from_secs(2)).is_none());
+        pc.set_alr_start_time(now + Duration::from_secs(2));
+        pc.set_alr_stop_time(now + Duration::from_secs(3));
+
+        // libwebrtc spaces drop probes by `last_bwe_drop_probing_time_` alone, so an application
+        // that probes every few seconds does not starve the recovery from a drop.
+        let requested = now + Duration::from_millis(3500);
+        pc.request_probe(Bitrate::mbps(6), requested);
+        assert!(pc.handle_timeout(requested).is_some());
+        pc.set_estimated_bitrate(Bitrate::mbps(3), BandwidthLimitedCause::DelayBasedLimited);
+
+        let p = pc
+            .handle_timeout(now + Duration::from_secs(4))
+            .expect("large-drop recovery probe");
+        assert_eq!(
+            p.target_bitrate(),
+            Bitrate::mbps(5) * PROBE_FRACTION_AFTER_DROP
+        );
+    }
+
+    #[test]
+    fn large_drop_probes_are_five_seconds_apart() {
+        let mut pc = ProbeControl::new();
+        pc.enable(true);
+        let now = Instant::now();
+        pc.set_desired_bitrate(Bitrate::mbps(5));
+        pc.set_estimated_bitrate(Bitrate::mbps(5), BandwidthLimitedCause::DelayBasedLimited);
+        while pc.handle_timeout(now).is_some() {}
+        assert!(pc.handle_timeout(now + Duration::from_secs(2)).is_none());
+        pc.set_alr_start_time(now + Duration::from_secs(2));
+        let targets = |pc: &mut ProbeControl, at| {
+            std::iter::from_fn(|| pc.handle_timeout(at))
+                .map(|p| p.target_bitrate())
+                .collect::<Vec<_>>()
+        };
+        pc.set_estimated_bitrate(Bitrate::mbps(3), BandwidthLimitedCause::DelayBasedLimited);
+        let first_drop_probe = Bitrate::mbps(5) * PROBE_FRACTION_AFTER_DROP;
+        assert!(targets(&mut pc, now + Duration::from_secs(6)).contains(&first_drop_probe));
+
+        pc.set_estimated_bitrate(
+            Bitrate::kbps(1500),
+            BandwidthLimitedCause::DelayBasedLimited,
+        );
+        let second_drop_probe = Bitrate::mbps(3) * PROBE_FRACTION_AFTER_DROP;
+        assert!(!targets(&mut pc, now + Duration::from_secs(8)).contains(&second_drop_probe));
     }
 
     #[test]
