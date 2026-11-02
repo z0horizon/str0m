@@ -1134,6 +1134,12 @@ mod test {
         );
         let second_drop_probe = Bitrate::mbps(3) * PROBE_FRACTION_AFTER_DROP;
         assert!(!targets(&mut pc, now + Duration::from_secs(8)).contains(&second_drop_probe));
+        // Past the 5 s, the next estimate update lets the held drop probe out.
+        pc.set_estimated_bitrate(
+            Bitrate::kbps(1600),
+            BandwidthLimitedCause::DelayBasedLimited,
+        );
+        assert!(targets(&mut pc, now + Duration::from_millis(11_500)).contains(&second_drop_probe));
     }
 
     #[test]
