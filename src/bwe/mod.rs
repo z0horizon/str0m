@@ -49,6 +49,20 @@ pub use probe::ProbeClusterConfig;
 #[cfg(not(feature = "_internal_test_exports"))]
 pub(crate) use probe::ProbeClusterConfig;
 
+/// A probe result below the acked rate is floored slightly under it, so a probe that lost a few
+/// packets drains the queue without cutting below what the link just delivered.
+/// As libwebrtc's `goog_cc_network_control.cc` (`kProbeDropThroughputFraction`), the floor never
+/// lifts the result above the last delay-based estimate.
+fn floor_probe(probe: Bitrate, last_estimate: Option<Bitrate>, acked: Option<Bitrate>) -> Bitrate {
+    let Some(acked) = acked else {
+        return probe;
+    };
+    let floor = acked * PROBE_DROP_THROUGHPUT_FRACTION;
+    probe.max(last_estimate.map_or(floor, |last| last.min(floor)))
+}
+
+const PROBE_DROP_THROUGHPUT_FRACTION: f64 = 0.85;
+
 const INITIAL_BITRATE_WINDOW: Duration = Duration::from_millis(500);
 const BITRATE_WINDOW: Duration = Duration::from_millis(150);
 const STARTUP_PHASE: Duration = Duration::from_secs(2);
@@ -276,7 +290,8 @@ impl SendSideBandwidthEstimator {
         let acked_bitrate = self.acked_bitrate_estimator.current_estimate();
 
         // Use the latest probe result from this update, if any
-        let probe_result = latest_probe_result;
+        let probe_result = latest_probe_result
+            .map(|p| floor_probe(p, self.delay_controller.last_estimate(), acked_bitrate));
 
         let is_probe_result = probe_result.is_some();
 
@@ -603,6 +618,26 @@ mod propagate_test {
 #[cfg(test)]
 mod estimate_report_test {
     use super::*;
+
+    #[test]
+    fn low_probe_result_is_floored_at_acked_rate() {
+        let floored = floor_probe(
+            Bitrate::kbps(1_000),
+            Some(Bitrate::kbps(3_000)),
+            Some(Bitrate::kbps(2_000)),
+        );
+        assert_eq!(floored, Bitrate::kbps(1_700));
+    }
+
+    #[test]
+    fn probe_floor_never_raises_above_the_last_estimate() {
+        let floored = floor_probe(
+            Bitrate::kbps(1_000),
+            Some(Bitrate::kbps(1_200)),
+            Some(Bitrate::kbps(2_000)),
+        );
+        assert_eq!(floored, Bitrate::kbps(1_200));
+    }
 
     #[test]
     fn reports_every_change_without_averaging() {
