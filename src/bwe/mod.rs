@@ -25,7 +25,6 @@ mod acked_bitrate_estimator;
 mod alr_detector;
 pub(crate) mod api;
 mod delay;
-mod link_capacity_estimator;
 mod loss_controller;
 mod macros;
 mod probe;
@@ -34,7 +33,6 @@ mod time;
 use acked_bitrate_estimator::AckedBitrateEstimator;
 use alr_detector::AlrDetector;
 use delay::DelayController;
-use link_capacity_estimator::LinkCapacityEstimator;
 use loss_controller::{LossController, LossControllerState};
 use macros::log_loss;
 
@@ -183,7 +181,6 @@ struct SendSideBandwidthEstimator {
     probe_estimator: ProbeEstimator,
     started_at: Option<Instant>,
     alr_detector: AlrDetector,
-    link_capacity_estimator: LinkCapacityEstimator,
     /// The estimate and its cause last handed to the probe control and the ALR detector.
     last_updated_estimate: Option<(Bitrate, BandwidthLimitedCause)>,
     /// A probe result was applied by `update` since `take_probe_applied`.
@@ -211,7 +208,6 @@ impl SendSideBandwidthEstimator {
             probe_estimator: ProbeEstimator::new(),
             started_at: None,
             alr_detector,
-            link_capacity_estimator: LinkCapacityEstimator::new(),
             last_updated_estimate: None,
             probe_applied: false,
             was_in_alr: false,
@@ -252,13 +248,8 @@ impl SendSideBandwidthEstimator {
         let mut latest_probe_result = None;
         for (_, bitrate) in self.probe_estimator.update(send_records.iter().copied()) {
             latest_probe_result = Some(bitrate);
-
-            // Every successful probe proves capacity, not just the latest, and not just ALR ones:
-            // the capacity bounds the estimate in ALR, so a low ALR probe that only ALR probes
-            // could raise would pin the estimate until it expires. The estimator keeps the max.
             // The delay controller only receives the latest probe result (matching WebRTC's
             // FetchAndResetLastEstimatedBitrate behavior).
-            self.link_capacity_estimator.update_from_probe(bitrate, now);
         }
 
         let mut acked_packets = vec![];
@@ -392,11 +383,6 @@ impl SendSideBandwidthEstimator {
         }
 
         self.loss_controller.set_alr_start_time(alr_start_time);
-
-        // Get link capacity estimate and forward to loss controller.
-        let link_capacity = self.link_capacity_estimator.capacity_estimate(now);
-        self.loss_controller
-            .set_link_capacity_estimate(link_capacity);
 
         // Clean up expired probe cluster state
         self.probe_estimator.handle_timeout(now);
@@ -691,43 +677,5 @@ mod request_probe_test {
             .handle_timeout(later)
             .expect("the requested probe");
         assert_eq!(probe.target_bitrate(), Bitrate::kbps(2_500));
-    }
-}
-
-#[cfg(test)]
-mod link_capacity_test {
-    use super::*;
-    use crate::rtp_::TwccPacketId;
-    use probe::{ProbeClusterConfig, ProbeKind};
-
-    // A requested probe that proves more capacity must lift the capacity that bounds the
-    // estimate in ALR; otherwise a low ALR probe pins the estimate until it expires.
-    #[test]
-    fn a_requested_probe_raises_the_link_capacity() {
-        let base = Instant::now();
-        let mut bwe = SendSideBandwidthEstimator::new(Bitrate::kbps(500));
-        let cluster: TwccClusterId = 3.into();
-        let config = ProbeClusterConfig::new(cluster, Bitrate::mbps(2), ProbeKind::Requested);
-        bwe.probe_estimator.probe_start(config, base);
-
-        let records: Vec<_> = (0..5)
-            .map(|i| {
-                let pid = TwccPacketId::with_cluster(TwccSeq::from(1000 + i), cluster);
-                TwccSendRecord::test_new(
-                    pid,
-                    base + Duration::from_millis(i * 4),
-                    1200,
-                    base + Duration::from_millis(i * 4 + 1),
-                    Some(base + Duration::from_millis(i * 4 + 2)),
-                )
-            })
-            .collect();
-        bwe.update(records.iter(), base + Duration::from_millis(50));
-
-        assert!(
-            bwe.link_capacity_estimator
-                .capacity_estimate(base + Duration::from_millis(50))
-                .is_some()
-        );
     }
 }
