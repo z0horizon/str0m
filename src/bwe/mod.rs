@@ -238,7 +238,6 @@ impl SendSideBandwidthEstimator {
         let mut latest_probe_result = None;
         for (_, bitrate) in self.probe_estimator.update(send_records.iter().copied()) {
             latest_probe_result = Some(bitrate);
-            self.probe_applied = true;
 
             // Every successful probe proves capacity, not just the latest, and not just ALR ones:
             // the capacity bounds the estimate in ALR, so a low ALR probe that only ALR probes
@@ -285,6 +284,10 @@ impl SendSideBandwidthEstimator {
         let maybe_estimate =
             self.delay_controller
                 .update(&acked_packets, acked_bitrate, probe_result, now);
+        // The delay controller ignores a probe result while overusing.
+        if is_probe_result && !self.delay_controller.is_overusing() {
+            self.probe_applied = true;
+        }
 
         let Some(delay_estimate) = maybe_estimate else {
             return;

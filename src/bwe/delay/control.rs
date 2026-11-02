@@ -195,12 +195,14 @@ impl DelayController {
         now: Instant,
     ) {
         // WebRTC's logic from delay_based_bwe.cc MaybeUpdateEstimate():
-        // - If we have a probe result, apply it directly and skip delay-based updates
+        // - While overusing, ignore any probe result and apply delay-based rate control
+        // - Otherwise, apply a probe result directly and skip delay-based updates
         // - Otherwise, apply normal delay-based rate control
         //
-        // This prevents probe results from being immediately overridden by delay-based
-        // decreases caused by the probe itself (probes cause temporary queuing delay).
-
+        // Skipping the delay-based update keeps a probe result from being overridden at once by
+        // the queuing delay the probe itself caused. A probe that ends in overuse measured a
+        // queue, not capacity.
+        let probe_bitrate = probe_bitrate.filter(|_| hypothesis != BandwidthUsage::Overuse);
         if let Some(probe_rate) = probe_bitrate {
             // Apply probe result directly, bypassing delay-based updates
             self.rate_control.set_probe_result(probe_rate, now);
@@ -263,6 +265,40 @@ mod test {
             c.last_estimate() > after_report,
             "a due timeout still updates"
         );
+    }
+
+    #[test]
+    fn probe_result_is_ignored_while_overusing() {
+        let now = Instant::now();
+        let mut c = DelayController::new(Bitrate::kbps(1000));
+        let observed = Some(Bitrate::kbps(1000));
+
+        c.update_estimate(BandwidthUsage::Normal, observed, None, None, now);
+        let before = c.last_estimate().unwrap();
+        let later = now + Duration::from_millis(300);
+        c.update_estimate(
+            BandwidthUsage::Overuse,
+            observed,
+            Some(Bitrate::kbps(2000)),
+            None,
+            later,
+        );
+
+        assert!(c.last_estimate().unwrap() <= before);
+    }
+
+    #[test]
+    fn probe_result_after_overuse_ends_is_applied() {
+        let now = Instant::now();
+        let mut c = DelayController::new(Bitrate::kbps(1000));
+        let observed = Some(Bitrate::kbps(1000));
+        let probe = Some(Bitrate::kbps(2000));
+
+        c.update_estimate(BandwidthUsage::Overuse, observed, probe, None, now);
+        let later = now + Duration::from_millis(300);
+        c.update_estimate(BandwidthUsage::Normal, observed, probe, None, later);
+
+        assert_eq!(c.last_estimate(), Some(Bitrate::kbps(2000)));
     }
 
     #[test]
