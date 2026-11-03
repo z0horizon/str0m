@@ -286,14 +286,7 @@ impl LossController {
 
             if increase_when_loss_limited && self.acknowledged_bitrate.is_valid() {
                 // Choose rampup factor based on whether we're in HOLD region (WebRTC lines 270-281)
-                let rampup_factor = if self.last_hold_info.rate.is_valid()
-                    && self.acknowledged_bitrate
-                        < self.last_hold_info.rate * self.config.bandwidth_rampup_hold_threshold
-                {
-                    self.config.bandwidth_rampup_upper_bound_factor_in_hold // 1.2
-                } else {
-                    self.config.bandwidth_rampup_upper_bound_factor // 1.5
-                };
+                let rampup_factor = self.rampup_factor();
 
                 best_candidate.loss_limited_bandwidth =
                     self.current_estimate.loss_limited_bandwidth.max(
@@ -420,6 +413,33 @@ impl LossController {
     #[cfg(test)]
     pub fn set_min_bitrate(&mut self, min_bitrate: Bitrate) {
         self.min_bitrate = min_bitrate;
+    }
+
+    /// How far above the acked rate a loss-limited estimate may rise: less while the acked rate
+    /// is still near the rate of the last HOLD.
+    fn rampup_factor(&self) -> f64 {
+        if self.last_hold_info.rate.is_valid()
+            && self.acknowledged_bitrate
+                < self.last_hold_info.rate * self.config.bandwidth_rampup_hold_threshold
+        {
+            self.config.bandwidth_rampup_upper_bound_factor_in_hold
+        } else {
+            self.config.bandwidth_rampup_upper_bound_factor
+        }
+    }
+
+    /// The rate to pad up to when a loss-limited estimate can only rise with the acked rate and
+    /// the acked rate is what holds it: a sender below its estimate, as an SFU sending whole
+    /// layers is, would otherwise keep it there. Just enough for the next rise to clear the
+    /// estimate by 10 %, so the padding leaves the link headroom rather than filling it.
+    pub fn padding_rate(&self) -> Option<Bitrate> {
+        const CLEARANCE: f64 = 1.1;
+        let factor = self.rampup_factor();
+        let blocked = self.is_bandwidth_limited_due_to_loss()
+            && self.acknowledged_bitrate.is_valid()
+            && self.reported_estimate.is_valid()
+            && self.acknowledged_bitrate * factor < self.reported_estimate;
+        blocked.then(|| self.reported_estimate * (CLEARANCE / factor).min(1.0))
     }
 
     pub fn loss_based_result(&self) -> LossBasedBweResult {
@@ -1535,6 +1555,31 @@ mod test {
         }
         let average = lbc.average_reported_loss_ratio();
         assert!(average < 0.01, "average loss {average}");
+    }
+
+    #[test]
+    fn pads_only_while_the_acked_rate_holds_a_loss_limited_estimate() {
+        let mut lbc = LossController::new();
+        lbc.state = LossControllerState::Decreasing;
+        lbc.reported_estimate = Bitrate::kbps(1_275);
+        lbc.last_hold_info.rate = Bitrate::kbps(1_200);
+        // A sender a layer below its estimate: 959 kbps x 1.2 cannot reach 1275 kbps.
+        lbc.set_acknowledged_bitrate(Bitrate::kbps(959));
+        assert_eq!(
+            lbc.padding_rate().map(|b| b.as_u64()),
+            Some(1_275_000 * 11 / 12)
+        );
+
+        lbc.set_acknowledged_bitrate(Bitrate::kbps(1_100));
+        assert_eq!(
+            lbc.padding_rate(),
+            None,
+            "1100 x 1.2 already clears the estimate"
+        );
+
+        lbc.set_acknowledged_bitrate(Bitrate::kbps(959));
+        lbc.state = LossControllerState::DelayBased;
+        assert_eq!(lbc.padding_rate(), None, "not loss limited");
     }
 
     struct PacketBuilder {

@@ -158,6 +158,11 @@ impl Bwe {
         self.bwe.is_overusing()
     }
 
+    /// The rate to pad up to while the acked rate holds a loss-limited estimate down.
+    pub fn loss_padding_rate(&self) -> Option<Bitrate> {
+        self.bwe.loss_padding_rate()
+    }
+
     pub fn set_desired_bitrate(&mut self, v: Bitrate) {
         self.desired_bitrate = v;
     }
@@ -435,6 +440,10 @@ impl SendSideBandwidthEstimator {
             LossControllerState::Increasing => BandwidthLimitedCause::LossLimitedBweIncreasing,
             LossControllerState::Decreasing => BandwidthLimitedCause::LossLimitedBwe,
         }
+    }
+
+    pub fn loss_padding_rate(&self) -> Option<Bitrate> {
+        self.loss_controller.padding_rate()
     }
 
     /// Get the latest estimate.

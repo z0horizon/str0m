@@ -1447,13 +1447,17 @@ impl Session {
             return;
         };
         let is_overuse = bwe.is_overusing();
+        let loss_padding = bwe.loss_padding_rate();
 
         let has_active_media = self.has_active_outgoing_media();
 
         // Calculate pacing and padding rates
-        let result = self
-            .pacer_control
-            .calculate(has_active_media, current_estimate, is_overuse);
+        let result = self.pacer_control.calculate(
+            has_active_media,
+            current_estimate,
+            is_overuse,
+            loss_padding,
+        );
 
         self.pacer.set_padding_rate(result.padding_rate);
         self.pacer.set_pacing_rate(result.pacing_rate);

@@ -39,6 +39,7 @@ impl PacerControl {
         has_active_media: bool,
         estimate: Bitrate,
         is_overuse: bool,
+        loss_padding: Option<Bitrate>,
     ) -> PacingResult {
         // ALR periodic probes handle bandwidth discovery, not continuous padding, unless the
         // application sets a padding target.
@@ -47,8 +48,13 @@ impl PacerControl {
             Bitrate::ZERO
         } else if has_active_media {
             // Pad to 50 kbps to maintain NAT bindings and RTX state, or to what the application
-            // asked for so that the acknowledged rate is up before it sends more media.
-            match self.padding_target {
+            // asked for so that the acknowledged rate is up before it sends more media, or to the
+            // acknowledged rate a loss-limited estimate needs before it may rise.
+            match [self.padding_target, loss_padding]
+                .into_iter()
+                .flatten()
+                .reduce(|a, b| a.max(b))
+            {
                 Some(target) => target.min(estimate).max(PADDING_TARGET),
                 None => PADDING_TARGET,
             }
@@ -79,21 +85,52 @@ mod test {
         let mut c = PacerControl::new();
         c.set_padding_target(Some(Bitrate::kbps(1_800)));
         assert_eq!(
-            c.calculate(true, Bitrate::kbps(2_200), false).padding_rate,
+            c.calculate(true, Bitrate::kbps(2_200), false, None)
+                .padding_rate,
             Bitrate::kbps(1_800)
         );
         assert_eq!(
-            c.calculate(true, Bitrate::kbps(1_000), false).padding_rate,
+            c.calculate(true, Bitrate::kbps(1_000), false, None)
+                .padding_rate,
             Bitrate::kbps(1_000)
         );
         assert_eq!(
-            c.calculate(true, Bitrate::kbps(2_200), true).padding_rate,
+            c.calculate(true, Bitrate::kbps(2_200), true, None)
+                .padding_rate,
             Bitrate::ZERO
         );
         c.set_padding_target(None);
         assert_eq!(
-            c.calculate(true, Bitrate::kbps(2_200), false).padding_rate,
+            c.calculate(true, Bitrate::kbps(2_200), false, None)
+                .padding_rate,
             PADDING_TARGET
+        );
+    }
+
+    #[test]
+    fn padding_fills_up_to_the_loss_padding_rate() {
+        let mut c = PacerControl::new();
+        let loss_padding = Some(Bitrate::kbps(1_500));
+        assert_eq!(
+            c.calculate(true, Bitrate::kbps(2_200), false, loss_padding)
+                .padding_rate,
+            Bitrate::kbps(1_500)
+        );
+        assert_eq!(
+            c.calculate(true, Bitrate::kbps(1_000), false, loss_padding)
+                .padding_rate,
+            Bitrate::kbps(1_000)
+        );
+        assert_eq!(
+            c.calculate(true, Bitrate::kbps(2_200), true, loss_padding)
+                .padding_rate,
+            Bitrate::ZERO
+        );
+        c.set_padding_target(Some(Bitrate::kbps(1_800)));
+        assert_eq!(
+            c.calculate(true, Bitrate::kbps(2_200), false, loss_padding)
+                .padding_rate,
+            Bitrate::kbps(1_800)
         );
     }
 
@@ -102,7 +139,7 @@ mod test {
         let c = PacerControl::new();
         let estimate = Bitrate::kbps(1_000);
 
-        let r = c.calculate(true, estimate, false);
+        let r = c.calculate(true, estimate, false, None);
 
         assert_eq!(r.padding_rate, PADDING_TARGET);
     }
@@ -112,7 +149,7 @@ mod test {
         let c = PacerControl::new();
         let estimate = Bitrate::kbps(1_000);
 
-        let r = c.calculate(false, estimate, false);
+        let r = c.calculate(false, estimate, false, None);
 
         assert_eq!(r.padding_rate, Bitrate::ZERO);
     }
@@ -122,7 +159,7 @@ mod test {
         let c = PacerControl::new();
         let estimate = Bitrate::mbps(40);
 
-        let r = c.calculate(true, estimate, true);
+        let r = c.calculate(true, estimate, true, None);
         assert_eq!(r.padding_rate, Bitrate::ZERO);
     }
 }
