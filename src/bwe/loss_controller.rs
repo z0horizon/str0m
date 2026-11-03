@@ -781,32 +781,88 @@ impl LossController {
     }
 
     fn average_reported_loss_ratio(&self) -> f64 {
+        if self.config.use_byte_loss_ratio {
+            return self.average_reported_byte_loss_ratio();
+        }
         let mut total = 0_f64;
         let mut lost = 0_f64;
-
-        for observation in self.observations.iter() {
-            if !observation.is_initialized {
-                continue;
-            }
-
-            let index = (self.num_observations - 1) - observation.id;
-
-            let instant_temporal_weight = self.instant_upper_bound_temporal_weights[index as usize];
-
-            if self.config.use_byte_loss_ratio {
-                total += instant_temporal_weight * observation.size.as_bytes_f64();
-                lost += instant_temporal_weight * observation.lost_size.as_bytes_f64();
-            } else {
-                total += instant_temporal_weight * observation.num_packets as f64;
-                lost += instant_temporal_weight * observation.num_lost_packets as f64;
-            }
+        for observation in self.observations.iter().filter(|o| o.is_initialized) {
+            let weight = self.instant_upper_bound_temporal_weight(observation);
+            total += weight * observation.num_packets as f64;
+            lost += weight * observation.num_lost_packets as f64;
         }
-
         if total == 0_f64 {
             return 0.0;
         }
-
         lost / total
+    }
+
+    /// Once there are more than three observations, the ones with the highest and the lowest loss
+    /// are left out, so one loss spike does not hold the estimate down for the whole window;
+    /// unless the highest-loss one sent at least twice the median rate, when its loss may be our
+    /// own burst (libwebrtc `CalculateAverageReportedByteLossRatio`).
+    fn average_reported_byte_loss_ratio(&self) -> f64 {
+        const MEDIAN_SENDING_RATE_FACTOR: f64 = 2.0;
+        let (mut total, mut lost) = (0_f64, 0_f64);
+        let (mut min_loss_rate, mut max_loss_rate) = (1_f64, 0_f64);
+        let (mut min_total, mut min_lost, mut max_total, mut max_lost) =
+            (0_f64, 0_f64, 0_f64, 0_f64);
+        let mut send_rate_of_max_loss = Bitrate::ZERO;
+        for observation in self.observations.iter().filter(|o| o.is_initialized) {
+            let weight = self.instant_upper_bound_temporal_weight(observation);
+            let size = observation.size.as_bytes_f64();
+            let lost_size = observation.lost_size.as_bytes_f64();
+            total += weight * size;
+            lost += weight * lost_size;
+            let loss_rate = if size > 0.0 { lost_size / size } else { 0.0 };
+            if self.num_observations > 3 {
+                if loss_rate > max_loss_rate {
+                    max_loss_rate = loss_rate;
+                    (max_total, max_lost) = (weight * size, weight * lost_size);
+                    send_rate_of_max_loss = observation.sending_rate;
+                }
+                if loss_rate < min_loss_rate {
+                    min_loss_rate = loss_rate;
+                    (min_total, min_lost) = (weight * size, weight * lost_size);
+                }
+            }
+        }
+        if total == 0_f64 {
+            return 0.0;
+        }
+        if self.median_sending_rate() * MEDIAN_SENDING_RATE_FACTOR <= send_rate_of_max_loss
+            || total == max_total + min_total
+        {
+            return lost / total;
+        }
+        (lost - min_lost - max_lost) / (total - max_total - min_total)
+    }
+
+    fn instant_upper_bound_temporal_weight(&self, observation: &Observation) -> f64 {
+        let index = (self.num_observations - 1) - observation.id;
+        self.instant_upper_bound_temporal_weights[index as usize]
+    }
+
+    fn median_sending_rate(&self) -> Bitrate {
+        let mut rates: Vec<f64> = self
+            .observations
+            .iter()
+            .filter(|o| {
+                o.is_initialized && o.sending_rate.is_valid() && o.sending_rate > Bitrate::ZERO
+            })
+            .map(|o| o.sending_rate.as_f64())
+            .collect();
+        if rates.is_empty() {
+            return Bitrate::ZERO;
+        }
+        rates.sort_by(f64::total_cmp);
+        let mid = rates.len() / 2;
+        let median = if rates.len() % 2 == 0 {
+            (rates[mid - 1] + rates[mid]) / 2.0
+        } else {
+            rates[mid]
+        };
+        Bitrate::bps(median as u64)
     }
 
     fn get_feasible_inherent_loss(&self, channel_parameters: &ChannelParameters) -> f64 {
@@ -1260,8 +1316,10 @@ mod test {
         } = lbc.loss_based_result();
 
         let estimate = bandwidth_estimate.expect("Should have an estimate");
+        // At least halved from 1.25 Mbps; the worst observation of the spike is left out of the
+        // average loss, as in libwebrtc.
         assert!(
-            estimate < Bitrate::bps(500_000),
+            estimate < Bitrate::bps(625_000),
             "A loss spike should result in a reduced estimate, estimate was {estimate}"
         );
         assert_eq!(state, LossControllerState::Decreasing);
@@ -1461,6 +1519,22 @@ mod test {
             // Rising while loss limited, like libwebrtc's kIncreasing.
             assert_eq!(state, LossControllerState::Increasing);
         }
+    }
+
+    #[test]
+    fn one_lossy_observation_is_left_out_of_the_average_loss() {
+        let mut lbc = LossController::new();
+        lbc.set_acknowledged_bitrate(Bitrate::mbps(1));
+        lbc.set_bandwidth_estimate(Bitrate::mbps(1));
+        let mut pkt_builder = PacketBuilder::new(Instant::now()).num_packets(25);
+        for i in 0..7 {
+            pkt_builder = pkt_builder.with_loss(if i == 3 { 1.0 } else { 0.0 });
+            let result = pkt_builder.build_packets();
+            lbc.update_bandwidth_estimate(&result, Bitrate::mbps(2));
+            pkt_builder = pkt_builder.forward_time(Duration::from_millis(250));
+        }
+        let average = lbc.average_reported_loss_ratio();
+        assert!(average < 0.01, "average loss {average}");
     }
 
     struct PacketBuilder {
