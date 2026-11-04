@@ -619,7 +619,7 @@ impl StreamTx {
                     // since the above loop figuring out param needs to be correct also
                     // for the NextPacketKind::Blank case.
                     set_pt_for_padding = Some(pt_main);
-                } else {
+                } else if ssrc_rtx.is_some() {
                     // If the PT we're sending on doesn't have a corresponding RTX PT,
                     // the packet is de-facto not nackable.
                     //
@@ -650,6 +650,9 @@ impl StreamTx {
                 header.sequence_number = *next.seq_no as u16;
                 header
             }
+            // Without an RTX stream a NACKed packet is resent as itself (RFC 4585), the way
+            // libwebrtc resends audio.
+            NextPacketKind::Resend(_) if ssrc_rtx.is_none() => header_ref.clone(),
             NextPacketKind::Resend(_) | NextPacketKind::Blank(_) => {
                 // * For the Resend case, we will not have accepted/cached the packet unless
                 //   we have a RTX PT (see logic setting next.pkt.nackable above).
@@ -702,7 +705,7 @@ impl StreamTx {
 
         // For resends, the original seq_no is inserted before the payload.
         let mut original_seq_len = 0;
-        if let NextPacketKind::Resend(orig_seq_no) = next.kind {
+        if let (NextPacketKind::Resend(orig_seq_no), Some(_)) = (next.kind, ssrc_rtx) {
             original_seq_len = RtpHeader::write_original_sequence_number(body_out, orig_seq_no);
             body_out = &mut body_out[original_seq_len..];
         }
@@ -876,9 +879,13 @@ impl StreamTx {
             h.push(now, len);
         }
 
-        let seq_no = self.seq_no_rtx.inc();
-
         let orig_seq_no = pkt.seq_no;
+        let seq_no = if self.rtx.is_some() {
+            self.seq_no_rtx.inc()
+        } else {
+            orig_seq_no
+        };
+
         self.resent_at.push_back((orig_seq_no, now));
         while self.resent_at.len() > 1000 {
             self.resent_at.pop_front();
@@ -1749,6 +1756,40 @@ mod test {
         let rtx_body = &buf[receipt.header.header_len..];
         assert_eq!(&rtx_body[..2], &10u16.to_be_bytes());
         assert_eq!(&rtx_body[2..], &[0x88, 0xaa, 0xbb, 0x03, 0x04]);
+    }
+
+    #[test]
+    fn without_rtx_a_nack_resends_the_original_packet() {
+        use crate::format::Codec;
+        let now = Instant::now();
+        let codecs = CodecConfig::new_with_defaults();
+        let opus = codecs
+            .params()
+            .iter()
+            .find(|p| p.spec().codec == Codec::Opus)
+            .expect("opus")
+            .pt();
+        let exts = ExtensionMap::standard();
+        let mut stream = StreamTx::new(42.into(), None, MidRid(Mid::from("0"), None), false, 1200);
+        let payload: Arc<[u8]> = vec![0xf8, 0x01, 0x02].into();
+        stream.write_rtp(
+            RtpWrite::new(opus, 10.into(), 9600, now, Arc::clone(&payload)).nackable(true),
+        );
+        stream.send_queue.handle_timeout(now);
+        let mut buf = vec![];
+        stream
+            .poll_packet(now, &exts, None, codecs.params(), &mut buf)
+            .expect("initial packet emitted");
+
+        stream.handle_nack([NackEntry { pid: 10, blp: 0 }].into_iter(), now, None);
+        let receipt = stream
+            .poll_packet(now, &exts, None, codecs.params(), &mut buf)
+            .expect("resend packet emitted");
+        assert_eq!(receipt.header.ssrc, 42.into());
+        assert_eq!(receipt.header.payload_type, opus);
+        assert_eq!(receipt.header.sequence_number, 10);
+        assert_eq!(*receipt.seq_no, 10);
+        assert_eq!(&buf[receipt.header.header_len..], &payload[..]);
     }
 
     fn essential_packet(seq_no: u64, now: Instant) -> RtpPacket {
